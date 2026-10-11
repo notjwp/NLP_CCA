@@ -1,0 +1,31 @@
+{
+  "dataset": "BEIR SciFact",
+  "n_docs": 5183,
+  "n_test_queries": 300,
+  "n_train_queries": 809,
+  "tfidf": {
+    "label": "lsc.lsc + stopwords + stemming",
+    "scheme": "lsc.lsc",
+    "stem": true,
+    "stopwords": true
+  },
+  "models": {
+    "minilm": "sentence-transformers/all-MiniLM-L6-v2",
+    "bge": "BAAI/bge-small-en-v1.5",
+    "bge_query_prompt": "Represent this sentence for searching relevant passages: ",
+    "cross_encoder": "cross-encoder/ms-marco-MiniLM-L-6-v2"
+  },
+  "run_depth": 100,
+  "rrf_k": 60,
+  "systems": {
+    "tfidf": "TF-IDF cosine (lsc.lsc)",
+    "dense-minilm": "Dense: all-MiniLM-L6-v2",
+    "dense-bge": "Dense: bge-small-en-v1.5",
+    "hybrid-rrf": "Hybrid: TF-IDF + bge (RRF)",
+    "tfidf-ce": "TF-IDF \u2192 cross-encoder"
+  },
+  "device": "cuda:0",
+  "gpu": "NVIDIA GeForce RTX 3050 Laptop GPU",
+  "torch": "2.14.1+cu130",
+  "python": "3.13.5"
+}

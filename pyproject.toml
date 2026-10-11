@@ -1,0 +1,52 @@
+[project]
+name = "irsys"
+version = "0.1.0"
+description = "Classical TF-IDF/cosine retrieval vs. semantic search on BEIR SciFact"
+readme = "README.md"
+authors = [
+    { name = "Jeevan W Prakash", email = "jeevanwp005@gmail.com" }
+]
+requires-python = ">=3.13"
+dependencies = [
+    "gradio>=6.30.0",
+    "huggingface-hub>=1.33.0",
+    "matplotlib>=3.11.2",
+    "nltk>=3.10.3",
+    "numpy>=2.5.3",
+    "pandas>=3.0.6",
+    "pyarrow>=25.0.1",
+    "scikit-learn>=1.9.1",
+    "scipy>=1.18.1",
+    "sentence-transformers>=5",
+    "tabulate>=0.10.0",
+    "torch>=2.9",
+    "tqdm>=4.70.1",
+]
+
+[project.scripts]
+irsys = "irsys.cli:main"
+
+[build-system]
+requires = ["uv_build>=0.11.32,<0.12.0"]
+build-backend = "uv_build"
+
+[[tool.uv.index]]
+name = "pytorch-cu130"
+url = "https://download.pytorch.org/whl/cu130"
+explicit = true
+
+[tool.uv.sources]
+torch = [{ index = "pytorch-cu130", marker = "sys_platform == 'win32' or sys_platform == 'linux'" }]
+
+[tool.uv]
+link-mode = "copy"  # cache (C:) and project (D:) are on different drives
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+addopts = ["--basetemp=.pytest_tmp"]
+markers = ["slow: downloads/runs transformer models"]
+
+[dependency-groups]
+dev = [
+    "pytest>=9.1.1",
+]
