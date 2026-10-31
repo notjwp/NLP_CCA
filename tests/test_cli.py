@@ -17,3 +17,8 @@ def test_parses_pipeline_commands():
 
 def test_parses_demo_command():
     assert build_parser().parse_args(["demo"]).command == "demo"
+
+
+def test_demo_includes_the_llm_unless_switched_off():
+    assert build_parser().parse_args(["demo"]).llm is True
+    assert build_parser().parse_args(["demo", "--no-llm"]).llm is False

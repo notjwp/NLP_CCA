@@ -1,6 +1,8 @@
 """Figures and error analysis from the files ``evaluate`` wrote (no retrieval is re-run)."""
 
 import json
+import re
+from collections import Counter
 from pathlib import Path
 
 import matplotlib
@@ -10,18 +12,21 @@ import matplotlib.pyplot as plt
 import numpy as np
 import pandas as pd
 from matplotlib import font_manager
+from sklearn.feature_extraction.text import ENGLISH_STOP_WORDS
 
 from irsys.data import RESULTS_DIR, doc_text, load_scifact
 from irsys.metrics import RECALL_KS
 from irsys.preprocess import Analyzer
 
-# Validated categorical palette (dataviz reference, slots 1-5, light surface); color follows the system.
+# Validated categorical palette (dataviz reference, slots 1-7, light surface); color follows the system.
 COLORS = {
     "tfidf": "#2a78d6",
     "dense-minilm": "#eb6834",
     "dense-bge": "#1baf7a",
     "hybrid-rrf": "#eda100",
     "tfidf-ce": "#e87ba4",
+    "tfidf-llm-zs": "#008300",
+    "tfidf-llm": "#6250d6",
 }
 SURFACE, INK, INK_2, MUTED, GRID, BASELINE = "#fcfcfb", "#0b0b0b", "#52514e", "#898781", "#e1e0d9", "#c3c2b7"
 BUCKETS = ["low", "medium", "high"]
@@ -53,11 +58,83 @@ def read_trec_run(path: Path) -> dict[str, list[str]]:
     return run
 
 
+def read_trec_scores(path: Path) -> dict[str, dict[str, float]]:
+    run: dict[str, dict[str, float]] = {}
+    for line in Path(path).read_text(encoding="utf-8").splitlines():
+        qid, _, doc, _rank, score, _tag = line.split()
+        run.setdefault(qid, {})[doc] = float(score)
+    return run
+
+
 def first_relevant_rank(ranking: list[str], qrels: dict[str, int]) -> int | None:
     for rank, doc in enumerate(ranking, start=1):
         if qrels.get(doc, 0) > 0:
             return rank
     return None
+
+
+# ---------------------------------------------------------------- error analysis
+
+CATEGORIES = ["spelling variant", "vocabulary mismatch", "rare shared term", "common words only"]
+RARE_DF = 10  # "rare" = occurs in at most 10 of the 5,183 abstracts
+_RAW_TOKEN_RE = re.compile(r"[a-z0-9]+")
+
+
+def spelling_variant(query: str, doc: str) -> bool:
+    """A claim word the abstract only contains when split differently (claim "Bcl2", abstract "BCL-2"), or the reverse."""
+    def tokens_and_joins(text: str) -> tuple[set[str], set[str]]:
+        tokens = _RAW_TOKEN_RE.findall(text.lower())
+        joins = {a + b for a, b in zip(tokens, tokens[1:]) if a not in ENGLISH_STOP_WORDS and b not in ENGLISH_STOP_WORDS}
+        return set(tokens), joins
+
+    q, q_joins = tokens_and_joins(query)
+    d, d_joins = tokens_and_joins(doc)
+    return bool((q - d) & d_joins or (d - q) & q_joins)
+
+
+def failure_category(query: str, relevant_texts: list[str], analyzer: Analyzer, df: dict[str, int]) -> str:
+    """What makes a claim hard, judged from the claim and its relevant abstract(s) only, so it is the same for
+    every system. Rules apply in order:
+
+    1. spelling variant:    a claim word is written differently in the abstract (Bcl2 / BCL-2);
+    2. vocabulary mismatch: fewer than half of the claim's index terms occur in the abstract;
+    3. rare shared term:    otherwise, a shared term occurs in at most ``RARE_DF`` abstracts;
+    4. common words only:   the shared terms are all common, so many abstracts match them.
+    """
+    if any(spelling_variant(query, t) for t in relevant_texts):
+        return "spelling variant"
+    terms = set(analyzer(query))
+    shared = terms & set().union(*(analyzer(t) for t in relevant_texts))
+    if not terms or len(shared) / len(terms) < 0.5:
+        return "vocabulary mismatch"
+    if any(df.get(t, 0) <= RARE_DF for t in shared):
+        return "rare shared term"
+    return "common words only"
+
+
+def error_table(category: pd.Series, ranks: pd.DataFrame, order: list[str] = CATEGORIES,
+                cutoff: int = 10) -> pd.DataFrame:
+    """Claims per category and, per system, how many have no relevant abstract in the top ``cutoff``.
+
+    ``ranks``: rank of the first relevant abstract per claim (rows) and system (columns), NaN if not in the run.
+    """
+    failed = ranks.isna() | (ranks > cutoff)
+    rows = []
+    for cat in order:
+        qids = category.index[category == cat]
+        if len(qids):
+            rows.append({"category": cat, "claims": len(qids), **failed.loc[qids].sum().astype(int).to_dict()})
+    rows.append({"category": "all claims", "claims": len(category),
+                 **failed.loc[category.index].sum().astype(int).to_dict()})
+    return pd.DataFrame(rows)
+
+
+def rerank_failures(first_stage: pd.Series, reranked: pd.Series, cutoff: int = 10) -> dict[str, int]:
+    """Split a reranker's failures: the relevant abstract was never a candidate, or it was but got ranked low."""
+    failed = reranked.isna() | (reranked > cutoff)
+    missed = first_stage.isna()
+    return {"failures": int(failed.sum()), "first stage missed it": int((failed & missed).sum()),
+            "reranker ranked it low": int((failed & ~missed).sum())}
 
 
 # ---------------------------------------------------------------- figures
@@ -201,7 +278,7 @@ def analyze(results_dir: Path = RESULTS_DIR) -> None:
 
     # Vocabulary-mismatch analysis, using the same analyzer the selected TF-IDF system indexes with.
     cfg = config["tfidf"]
-    overlap = lexical_overlap(queries, qrels, texts, Analyzer(cfg["stem"], cfg["stopwords"]))
+    overlap = lexical_overlap(queries, qrels, texts, Analyzer.from_config(cfg))
     bucket = overlap_terciles(overlap)
     ndcg = per_query.pivot(index="qid", columns="system", values="nDCG@10")
     rows = []
@@ -213,7 +290,7 @@ def analyze(results_dir: Path = RESULTS_DIR) -> None:
     plot_overlap_buckets(table, systems, names, fig_dir / "overlap_buckets.png")
     (results_dir / "overlap_buckets.md").write_text(
         "Mean nDCG@10 per lexical-overlap tercile. Overlap = share of a query's index terms "
-        f"(analyzer: stemming={cfg['stem']}, stopwords={cfg['stopwords']}) that occur in its relevant abstract(s). "
+        f"(analyzer of the selected TF-IDF config: {cfg['label']}) that occur in its relevant abstract(s). "
         f"Spearman ρ between overlap and per-query nDCG@10: "
         + ", ".join(f"{names[s]} {overlap.corr(ndcg[s].reindex(overlap.index), method='spearman'):.2f}"
                     for s in systems)
@@ -222,7 +299,72 @@ def analyze(results_dir: Path = RESULTS_DIR) -> None:
         encoding="utf-8",
     )
     _write_examples(results_dir, queries, qrels, corpus, ndcg, overlap, names, systems)
+    _write_error_analysis(results_dir, queries, qrels, corpus, texts, Analyzer.from_config(cfg), names, systems)
     print(f"Figures and analysis written to {results_dir}")
+
+
+def _write_error_analysis(results_dir, queries, qrels, corpus, texts, analyzer, names, systems) -> None:
+    df = Counter(t for text in texts.values() for t in set(analyzer(text)))
+    relevant = {qid: [d for d, g in qrels[qid].items() if g > 0] for qid in queries}
+    category = pd.Series({qid: failure_category(queries[qid], [texts[d] for d in relevant[qid]], analyzer, df)
+                          for qid in queries})
+    runs = {s: read_trec_run(results_dir / "runs" / f"{s}.trec") for s in systems}
+    ranks = pd.DataFrame({s: {qid: first_relevant_rank(runs[s].get(qid, []), qrels[qid]) for qid in queries}
+                          for s in systems}, dtype=float)
+
+    table = error_table(category, ranks)
+    for s in systems:
+        table[s] = [f"{n} ({100 * n / c:.0f}%)" for n, c in zip(table[s], table["claims"])]
+    parts = [
+        f"# Error analysis (SciFact test, {len(queries)} claims)\n\n"
+        "A claim **fails** for a system when none of its relevant abstracts is in that system's top 10 "
+        "(nDCG@10 = 0).\n\n"
+        "## 1. Failures by cause\n\n"
+        "Each claim is put in one category using only the claim and its relevant abstract(s), so the "
+        "categories are the same for every system. Rules, applied in order: **spelling variant** = a claim word "
+        "is written differently in the abstract (e.g. *Bcl2* / *BCL-2*); **vocabulary mismatch** = fewer than half "
+        "of the claim's index terms occur in the abstract; **rare shared term** = a shared term occurs in at most "
+        f"{RARE_DF} of the {len(texts):,} abstracts; **common words only** = everything else. "
+        "Cells: failures (share of the category's claims).\n\n",
+        table.rename(columns=names).to_markdown(index=False) + "\n",
+    ]
+    for cat in CATEGORIES:
+        qids = sorted(category.index[category == cat], key=int)[:2]
+        if qids:
+            parts.append(f"\n**{cat}**, e.g.\n")
+            for qid in qids:
+                rank_text = "; ".join(f"{names[s]} {int(r) if r == r else '>100'}" for s, r in ranks.loc[qid].items())
+                parts.append(f"- [{qid}] “{queries[qid]}” → *{corpus[relevant[qid][0]]['title']}*. "
+                             f"Rank of the relevant abstract: {rank_text}.\n")
+
+    rerankers = [s for s in systems if s.startswith("tfidf-")]
+    if rerankers:
+        rows = [{"system": names[s], **rerank_failures(ranks["tfidf"], ranks[s])} for s in rerankers]
+        parts += [
+            "\n## 2. Rerankers: first-stage misses vs. reranking mistakes\n\n"
+            "The rerankers only reorder TF-IDF's top 100. A failure is either a relevant abstract TF-IDF never "
+            "retrieved (no reranker can fix it) or one the reranker saw but placed below rank 10.\n\n",
+            pd.DataFrame(rows).to_markdown(index=False) + "\n",
+        ]
+
+    llms = [s for s in systems if s.startswith("tfidf-llm")]
+    if llms:
+        rows = []
+        for s in llms:
+            scores = read_trec_scores(results_dir / "runs" / f"{s}.trec")
+            every = np.array([v for run in scores.values() for v in run.values()])
+            rel = np.array([v for qid, run in scores.items() for d, v in run.items() if d in relevant.get(qid, [])])
+            rows.append({"system": names[s], "candidates judged": len(every),
+                         "answered yes (P(yes) > 0.5)": f"{100 * (every > 0).mean():.1f}%",
+                         "relevant candidates answered yes": f"{100 * (rel > 0).mean():.1f}%"})
+        parts += [
+            "\n## 3. How the LLMs answer\n\n"
+            "Each LLM is asked whether an abstract meets the claim's information need and may only answer "
+            "yes or no; its score is log P(yes)/P(no). Share of the TF-IDF candidates it answered *yes* "
+            "(most candidates are not relevant: about 1 in 100 is):\n\n",
+            pd.DataFrame(rows).to_markdown(index=False) + "\n",
+        ]
+    (results_dir / "error_analysis.md").write_text("".join(parts), encoding="utf-8")
 
 
 def _write_examples(results_dir, queries, qrels, corpus, ndcg, overlap, names, systems, n=3) -> None:

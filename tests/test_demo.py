@@ -1,8 +1,17 @@
+import numpy as np
 import pytest
 
 from irsys.base import Retriever
-from irsys.demo import DemoEngine, highlight, render_explanation, render_results, scheme_formula
+from irsys.demo import (
+    DemoEngine,
+    highlight,
+    render_explanation,
+    render_llm_explanation,
+    render_results,
+    scheme_formula,
+)
 from irsys.preprocess import Analyzer
+from irsys.rerank import RerankRetriever
 from irsys.tfidf import TfidfRetriever
 
 ANALYZER = Analyzer(stem=True, stopwords=True)
@@ -23,11 +32,29 @@ class _Fixed(Retriever):
         return [("d4", 0.9), ("d3", 0.8), ("d2", 0.7), ("d1", 0.1)][:k]
 
 
+class _FakeLLM:
+    """Stand-in for LLMReranker: says yes (log-odds +2) to papers mentioning vitamins, no (-3) otherwise."""
+
+    instruction = "Given a scientific claim, retrieve documents that support or refute the claim"
+
+    def score(self, query, texts):
+        return np.array([2.0 if "vitamin" in t.lower() else -3.0 for t in texts])
+
+
 @pytest.fixture
 def engine():
     ids = list(CORPUS)
-    tfidf = TfidfRetriever(ANALYZER, "lsc.lsc").index(ids, [f"{CORPUS[d]['title']} {CORPUS[d]['text']}" for d in ids])
+    texts = [f"{CORPUS[d]['title']} {CORPUS[d]['text']}" for d in ids]
+    tfidf = TfidfRetriever(ANALYZER, "lsc.lsc").index(ids, texts)
     return DemoEngine(CORPUS, QUERIES, QRELS, tfidf, {"TF-IDF": tfidf, "Semantic": _Fixed()})
+
+
+@pytest.fixture
+def llm_engine(engine):
+    texts = {d: f"{CORPUS[d]['title']} {CORPUS[d]['text']}" for d in CORPUS}
+    engine.systems["LLM"] = RerankRetriever(engine.tfidf, _FakeLLM(), texts, depth=100)
+    engine.llm_name = "LLM"
+    return engine
 
 
 def test_highlight_marks_stemmed_variants_but_not_stopwords():
@@ -82,8 +109,24 @@ def test_oov_terms_are_reported(engine):
 def test_rendered_results_show_check_mark_and_rank(engine):
     html = render_results(engine.compare(QUERIES["q1"], k=2), ANALYZER, QUERIES["q1"])
     assert "✓" in html
-    assert "rank 3" in html  # semantic system's correct abstract
+    assert "position 3" in html  # semantic system's correct abstract
     assert "<mark>" in html
+
+
+def test_rendered_results_explain_each_system_in_plain_words(engine):
+    engine.descriptions = {"TF-IDF": "Matches the words.", "Semantic": "Matches the meaning."}
+    html = render_results(engine.compare(QUERIES["q1"], k=2), ANALYZER, QUERIES["q1"])
+    assert "Matches the words." in html and "Matches the meaning." in html
+
+
+def test_rendered_results_say_when_the_correct_paper_is_missing(engine):
+    class _Nothing(Retriever):
+        def search(self, query, k=10):
+            return [("d4", 0.9)]
+
+    engine.systems = {"Nothing": _Nothing()}
+    html = render_results(engine.compare(QUERIES["q1"], k=2), ANALYZER, QUERIES["q1"])
+    assert "✗ correct paper not in its top 100" in html
 
 
 def test_scheme_formula_describes_weighting():
@@ -95,30 +138,64 @@ def test_explanation_walks_through_every_step(engine):
     html = render_explanation(engine, QUERIES["q1"])
     for step in ("Step 1", "Step 2", "Step 3"):
         assert step in html
-    assert "the correct abstract ✓" in html  # TF-IDF's top hit is the correct one...
-    assert "<b>Correct abstract</b>" not in html  # ...so it is not explained twice
+    assert "the correct paper ✓" in html  # TF-IDF's top hit is the correct one...
+    assert "<b>Correct paper</b>" not in html  # ...so it is not explained twice
 
 
 def test_explanation_contrasts_top_hit_with_correct_abstract(engine):
     html = render_explanation(engine, QUERIES["q2"])
     assert html.count('class="doc"') == 2
-    assert "#1 result" in html and "<b>Correct abstract</b>" in html
+    assert "#1 result" in html and "<b>Correct paper</b>" in html
     assert "Gene mutations" in html and "Vitamin D" in html
 
 
 def test_explanation_flags_terms_missing_from_corpus(engine):
     html = render_explanation(engine, "ivermectin vitamin")
-    assert "occur in <b>no</b> abstract" in html and "ivermectin" in html
+    assert "appear in <b>no</b> paper" in html and "ivermectin" in html
 
 
 def test_explanation_when_no_query_term_is_indexed(engine):
     html = render_explanation(engine, "zebra quokka")
-    assert "None of the query terms occur in the corpus" in html
+    assert "None of the claim's words appear in any paper" in html
     assert "Step 3" not in html
 
 
 def test_correct_abstract_below_the_visible_list_is_flagged_not_ticked(engine):
     html = render_results(engine.compare(QUERIES["q1"], k=2), ANALYZER, QUERIES["q1"])
-    assert "✓ correct abstract at rank 1" in html  # TF-IDF: shown in the list
-    assert "correct abstract only at rank 3" in html  # semantic: below the 2 shown results
-    assert "✓ correct abstract at rank 3" not in html
+    assert "✓ found the correct paper at position 1" in html  # TF-IDF: shown in the list
+    assert "▼ correct paper only at position 3" in html  # semantic: below the 2 shown results
+    assert "✓ found the correct paper at position 3" not in html
+
+
+def test_fast_and_slow_systems_can_be_compared_separately(llm_engine):
+    fast = llm_engine.compare(QUERIES["q2"], k=2, names=llm_engine.fast_names())
+    assert [r.name for r in fast] == ["TF-IDF", "Semantic"]
+    (llm,) = llm_engine.compare(QUERIES["q2"], k=2, names=["LLM"])
+    assert llm.hits[0].doc_id == "d2" and llm.correct_rank == 1  # TF-IDF had it 2nd; the LLM says yes to it
+
+
+def test_engine_without_llm_has_only_fast_systems(engine):
+    assert engine.llm_name is None and engine.fast_names() == ["TF-IDF", "Semantic"]
+
+
+def test_pending_column_is_shown_while_the_llm_works(engine):
+    html = render_results(engine.compare(QUERIES["q1"], k=2), ANALYZER, QUERIES["q1"], pending=["LLM reranker"])
+    assert html.count('class="col') == 3 and "LLM reranker" in html and "reading" in html
+
+
+def test_llm_explanation_shows_the_prompt_and_yes_probabilities(llm_engine):
+    html = render_llm_explanation(llm_engine, QUERIES["q2"])
+    assert "&lt;Query&gt;: BRCA gene mutations and vitamin intake" in html  # the exact prompt, escaped
+    assert "88.1%" in html  # sigmoid(+2): the vitamin paper
+    assert "4.7%" in html  # sigmoid(-3): TF-IDF's #1, the BRCA paper
+    assert "Correct paper" in html and "TF-IDF's #1" in html
+
+
+def test_llm_explanation_without_an_llm(engine):
+    assert "not loaded" in render_llm_explanation(engine, QUERIES["q1"])
+
+
+def test_explanation_shows_parts_of_speech_and_noun_phrases(engine):
+    html = render_explanation(engine, QUERIES["q1"])  # "Low vitamin D causes fractures"
+    assert "adjective" in html and "noun" in html and "verb" in html
+    assert "low vitamin d" in html  # noun-phrase chunk from the parser

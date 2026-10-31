@@ -7,7 +7,8 @@ similarity**, then measure its retrieval effectiveness against modern **semantic
 pretrained transformer language models. The questions are:
 
 1. How good is a well-configured TF-IDF system on a realistic scientific retrieval task?
-2. Do semantic (embedding-based) methods beat it, by how much, and is the gap statistically reliable?
+2. Do semantic methods built on transformer language models (embeddings, a cross-encoder and LLM
+   rerankers) beat it, by how much, and is the gap statistically reliable?
 3. *Where* does each approach win, and why?
 4. What does the extra effectiveness cost in time, memory and hardware?
 
@@ -36,6 +37,22 @@ that answer them (for example, a claim about "silencing of Bcl2" is answered by 
 
 **Text analysis** (`src/irsys/preprocess.py`). Lowercase → split into `[a-z0-9]+` tokens (numbers are
 kept, since claims often quote figures) → remove English stopwords → Porter stemming.
+
+Two classical NLP options build on **part-of-speech (POS) tagging**. NLTK's averaged-perceptron tagger
+labels every token with a Penn Treebank tag (Marcus et al., 1993), with stopwords still in place so the
+tagger sees the full context:
+
+- **POS-based lemmatization** replaces stemming. Each word becomes its WordNet dictionary form for its
+  part of speech (Miller, 1995): *studies* (NNS) → *study*, *increased* (VBD) → *increase*, and *meeting*
+  stays *meeting* as a noun but becomes *meet* as a verb.
+- **Noun-phrase chunking** (shallow parsing) runs NLTK's regular-expression chunk parser with the grammar
+  `NP: {<JJ.*|NN.*>*<NN.*>}`. That is the adjective/noun-ending-in-a-noun pattern of technical terms
+  (Justeson & Katz, 1995). For example, *"LDL cholesterol has no involvement in the development of
+  cardiovascular disease"* is parsed as [LDL cholesterol] … [involvement] … [development] … [cardiovascular
+  disease]. Each pair of adjacent words inside a phrase becomes an extra index term (`ldl_cholesterol`,
+  `cardiovascular_diseas`), a POS-filtered form of biword indexing (Manning et al., 2008, §2.4.1).
+
+Both options are evaluated in the ablation (§4.1). The demo shows every step for any claim.
 
 **Inverted index** (`src/irsys/tfidf.py`). One postings list per term holds the documents it occurs in,
 with weights pre-computed and length-normalized at index time. The SciFact index has 25,963 terms
@@ -77,22 +94,49 @@ scheme is changed.
 | **Dense: bge-small-en-v1.5** | Same bi-encoder approach; queries get the instruction prefix *"Represent this sentence for searching relevant passages: "* | BAAI BGE small, 33.4M params, trained specifically for retrieval (Xiao et al., 2023) |
 | **TF-IDF → cross-encoder** | Two-stage. TF-IDF retrieves the top 100; a cross-encoder reads each *(query, abstract)* pair **jointly** and re-scores it (Nogueira & Cho, 2019). | `ms-marco-MiniLM-L-6-v2`, 22.7M params, trained on MS MARCO web search |
 | **Hybrid: TF-IDF + bge (RRF)** | Reciprocal Rank Fusion of the TF-IDF and bge rankings: $\text{score}(d) = \sum_{r} \frac{1}{60 + \text{rank}_r(d)}$ (Cormack et al., 2009). It uses ranks only, so the different score scales never need calibrating. | none beyond its two inputs |
+| **TF-IDF → LLM, zero-shot** | Two-stage. TF-IDF retrieves the top 100; a general chat LLM is *prompted* (no task training) with the claim and one abstract, and may only answer "yes" or "no". | Qwen3-0.6B, 596M params, decoder-only LLM (Qwen Team, 2025) |
+| **TF-IDF → LLM reranker** | The same prompt and scoring, on the same LLM after fine-tuning for relevance judgement. | Qwen3-Reranker-0.6B, 596M params (Zhang et al., 2025) |
 
-All models are used off the shelf, with no fine-tuning. They are compact transformer *encoder*
-language models (BERT family) rather than large generative LLMs. This is the standard way language
-models are used for search, and it is what fits on a 4 GB laptop GPU.
+All models are used off the shelf; we fine-tune nothing. The bi-encoders and the cross-encoder are
+compact *encoder* language models (BERT family). The two Qwen3 models are *decoder-only*, GPT-style
+large language models, small enough (0.6B parameters, 1.2 GB in bfloat16) to run on a 4 GB laptop GPU.
+
+**LLM scoring** (`src/irsys/llm.py`). Each (claim, abstract) pair becomes one chat prompt, in the format
+Qwen3-Reranker was trained on, with the task instruction its authors use for SciFact:
+
+```
+<|im_start|>system
+Judge whether the Document meets the requirements based on the Query and the Instruct provided.
+Note that the answer can only be "yes" or "no".<|im_end|>
+<|im_start|>user
+<Instruct>: Given a scientific claim, retrieve documents that support or refute the claim
+<Query>: {claim}
+<Document>: {title + abstract}<|im_end|>
+<|im_start|>assistant
+<think>
+
+</think>
+
+```
+
+The LLM does not generate any text. One forward pass gives its next-token logits, and the relevance
+score is the log-odds $\log P(\text{yes}) / P(\text{no}) = z_\text{yes} - z_\text{no}$: pointwise relevance
+judgement, as in monoT5 (Nogueira et al., 2020). Prompts are capped at 512 tokens, the same as the
+cross-encoder, by cutting the end of the abstract. Running one prompt through the same-size LLM before and
+after relevance fine-tuning separates what prompting alone achieves from what task training adds.
 
 ### 3.3 Experimental protocol
 
 - **No tuning on test data.** The TF-IDF configuration is selected by nDCG@10 on the **train** queries
-  (§4.1). The models, the cross-encoder depth (100) and the RRF constant ($k=60$, the published default)
-  are fixed in advance. The 300 test queries are used once, for the final comparison.
+  (§4.1). The models, the reranking depth (100), the LLM prompt (the model authors' SciFact instruction)
+  and the RRF constant ($k=60$, the published default) are fixed in advance. The 300 test queries are
+  used once, for the final comparison.
 - **Metrics** are implemented from scratch with trec_eval/BEIR definitions and unit-tested on
   hand-computed cases. **nDCG@10** is the primary metric, as in BEIR. MAP@100, MRR@10, P@10, Recall@10
   and Recall@100 are also reported. Every system returns the top 100 documents per query.
 - **Uncertainty and significance.** 95% confidence intervals use a 10,000-sample bootstrap over
   queries. Each system is compared with TF-IDF on the *same* queries using the two-sided Wilcoxon
-  signed-rank test (plus a paired t-test as a cross-check), with a Holm correction over the 4
+  signed-rank test (plus a paired t-test as a cross-check), with a Holm correction over the 6
   comparisons per metric.
 - **Hardware:** NVIDIA RTX 3050 Laptop GPU (4 GB), PyTorch 2.14.1 (CUDA 13.0), Python 3.13.5.
   TF-IDF runs on the CPU.
@@ -109,14 +153,33 @@ From [`results/ablation_train.md`](results/ablation_train.md):
 | `ltc.ltc` + stopwords | 0.6456 | 0.6029 | 0.9149 |
 | `ltc.ltc` + stopwords + stemming | 0.6688 | 0.6250 | 0.9279 |
 | `lnc.ltc` + stopwords + stemming | 0.6758 | 0.6343 | 0.9221 |
-| **`lsc.lsc` + stopwords + stemming (selected)** | **0.6789** | **0.6364** | **0.9309** |
+| **`lsc.lsc` + stopwords + stemming (selected)** | **0.6789** | **0.6364** | 0.9309 |
+| `lsc.lsc` + stopwords + POS lemmatization | 0.6644 | 0.6206 | 0.9198 |
+| `lsc.lsc` + stopwords + stemming + noun phrases | 0.6595 | 0.6147 | **0.9371** |
+| `lsc.lsc` + stopwords + POS lemmatization + noun phrases | 0.6411 | 0.5978 | 0.9285 |
 | scikit-learn `TfidfVectorizer` reference (= `lsc.lsc`) | 0.6789 | 0.6364 | 0.9309 |
 
 - **Sublinear tf + stopword removal** gives the largest gain (+0.050 nDCG@10 over raw counts). One
   repeated term can no longer dominate a document, and function words stop adding noise.
 - **Porter stemming** adds +0.023, by matching *mutation/mutations/mutated*.
-- The last three variants are within about 0.01 of each other. idf is the only thing they change: none on
-  documents (`lnc`), or the "+1" variant that keeps common terms from dropping to zero weight (`lsc`).
+- The `lnc`/`ltc`/`lsc` variants with stemming are within about 0.01 of each other. idf is the only thing
+  they change: none on documents (`lnc`), or the "+1" variant that keeps common terms from dropping to
+  zero weight (`lsc`).
+- **POS-based lemmatization is worse than stemming** (−0.015). Lemmatization is the more conservative
+  normalizer: the corpus has 35,450 distinct surface words, 32,017 lemmas but only 25,963 stems. Stemming
+  maps *activate, activation, active* all to `activ`, and *indicate, indication, indicator* to `indic`,
+  while lemmatization keeps the verb and the noun apart. Claims and abstracts often state the same fact
+  with a different form of the word (claim *discontinue* / abstract *discontinuation*; *positivity* /
+  *positive*). On the training claims, stems match more of a claim's terms in its relevant abstract than
+  lemmas do for **228** of the 809 claims, and fewer for only 27. That extra matching outweighs stemming's
+  over-merging (*organ/organism/organization* → `organ`).
+- **Noun-phrase terms lower nDCG@10 (−0.019) but give the best Recall@100 (0.937).** Phrases are very
+  specific: 36% of the claims' phrase terms occur in no abstract, and the rest are rare (median document
+  frequency 6). Their large idf lets one exact shared phrase dominate the score, which pulls in some
+  extra relevant abstracts lower down but often promotes the wrong abstract to the top. Combining both
+  options is the worst of the POS variants (0.641).
+- The selection rule (best nDCG@10 on train) therefore keeps plain stemming. POS tagging and chunking stay
+  in the system as analysis tools: the demo shows the tags and phrases for any claim.
 - The scikit-learn reference reproduces our `lsc.lsc` system exactly, which cross-checks the whole
   pipeline end to end.
 

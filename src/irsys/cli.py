@@ -1,4 +1,4 @@
-"""Command line: ``irsys evaluate | analyze | search "query"``."""
+"""Command line: ``irsys evaluate | analyze | search "query" | demo``."""
 
 import argparse
 import json
@@ -13,11 +13,13 @@ def build_parser() -> argparse.ArgumentParser:
     search = sub.add_parser("search", help="show TF-IDF and dense results side by side for one query")
     search.add_argument("query")
     search.add_argument("-k", type=int, default=5, help="results per system (default 5)")
-    sub.add_parser("demo", help="open the interactive presentation demo in the browser")
+    demo = sub.add_parser("demo", help="open the interactive presentation demo in the browser")
+    demo.add_argument("--no-llm", dest="llm", action="store_false",
+                      help="leave out the LLM reranker column (faster start, no GPU needed)")
     return parser
 
 
-def _demo() -> None:
+def _demo(llm: bool = True) -> None:
     import os
     from pathlib import Path
 
@@ -30,7 +32,7 @@ def _demo() -> None:
 
     from irsys.demo import launch_demo
 
-    launch_demo()
+    launch_demo(llm=llm)
 
 
 def _search(query: str, k: int) -> None:
@@ -46,7 +48,7 @@ def _search(query: str, k: int) -> None:
     config_path = RESULTS_DIR / "config.json"
     cfg = json.loads(config_path.read_text(encoding="utf-8"))["tfidf"] if config_path.exists() else {
         "scheme": "ltc.ltc", "stem": True, "stopwords": True}
-    tfidf = TfidfRetriever(Analyzer(cfg["stem"], cfg["stopwords"]), cfg["scheme"]).index(doc_ids, texts)
+    tfidf = TfidfRetriever(Analyzer.from_config(cfg), cfg["scheme"]).index(doc_ids, texts)
     dense = DenseRetriever(BGE, query_prompt=BGE_QUERY_PROMPT, name="Dense (bge-small-en-v1.5)").index(doc_ids, texts)
 
     print(f"\nQuery: {query}")
@@ -71,6 +73,6 @@ def main(argv: list[str] | None = None) -> None:
 
         analyze()
     elif args.command == "demo":
-        _demo()
+        _demo(args.llm)
     else:
         _search(args.query, args.k)

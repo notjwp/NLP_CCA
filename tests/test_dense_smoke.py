@@ -47,3 +47,16 @@ def test_cross_encoder_prefers_relevant_passage():
     scores = CrossEncoderReranker().score(QUERY, TEXTS)
     assert scores.shape == (5,)
     assert int(np.argmax(scores)) == 0
+
+
+def test_llm_reranker_prefers_relevant_passage():
+    from irsys.llm import LLMReranker
+
+    reranker = LLMReranker("Qwen/Qwen3-Reranker-0.6B", instruction="Given a question, retrieve passages that answer it",
+                           batch_size=2)  # odd batch split + length sorting must still map scores back in order
+    scores = reranker.score(QUERY, TEXTS)
+    assert scores.shape == (5,)
+    assert int(np.argmax(scores)) == 0
+    assert scores[0] > 0 > max(scores[1:])  # P(yes) > 0.5 only for the relevant passage
+    # Same pairs in a different batch: equal up to bf16 rounding on the GPU (the gap between them is ~10).
+    assert reranker.score(QUERY, [TEXTS[3], TEXTS[0]]) == pytest.approx(scores[[3, 0]], abs=0.3)

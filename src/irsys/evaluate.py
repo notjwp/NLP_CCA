@@ -1,19 +1,23 @@
 """End-to-end experiment: TF-IDF ablation on train, then all systems on the SciFact test split."""
 
+import gc
 import json
 import platform
 import time
+from collections.abc import Callable
 from dataclasses import dataclass
 from pathlib import Path
 
 import numpy as np
 import pandas as pd
 import torch
+from tqdm import tqdm
 
 from irsys.base import Retriever, Run
 from irsys.data import RESULTS_DIR, doc_text, load_scifact
 from irsys.dense import DenseRetriever
 from irsys.fusion import RRFHybrid
+from irsys.llm import INSTRUCTION, LLMReranker
 from irsys.metrics import evaluate_run
 from irsys.preprocess import Analyzer
 from irsys.rerank import CrossEncoderReranker, RerankRetriever
@@ -24,6 +28,8 @@ MINILM = "sentence-transformers/all-MiniLM-L6-v2"
 BGE = "BAAI/bge-small-en-v1.5"
 BGE_QUERY_PROMPT = "Represent this sentence for searching relevant passages: "
 CROSS_ENCODER = "cross-encoder/ms-marco-MiniLM-L-6-v2"
+LLM_ZERO_SHOT = "Qwen/Qwen3-0.6B"  # general chat LLM, prompted only
+LLM_RERANKER = "Qwen/Qwen3-Reranker-0.6B"  # same LLM, fine-tuned for relevance judgements
 RUN_DEPTH = 100  # docs kept per query; also the reranking depth
 SIGNIFICANCE_METRICS = ("nDCG@10", "R@100")
 MAIN_METRICS = ["nDCG@10", "MAP@100", "MRR@10", "P@10", "R@10", "R@100"]
@@ -35,9 +41,14 @@ class TfidfConfig:
     scheme: str
     stem: bool
     stopwords: bool
+    lemmatize: bool = False
+    phrases: bool = False
+
+    def analyzer(self) -> Analyzer:
+        return Analyzer(self.stem, self.stopwords, self.lemmatize, self.phrases)
 
     def build(self) -> TfidfRetriever:
-        return TfidfRetriever(Analyzer(stem=self.stem, stopwords=self.stopwords), self.scheme)
+        return TfidfRetriever(self.analyzer(), self.scheme)
 
 
 ABLATION_CONFIGS = [
@@ -46,6 +57,11 @@ ABLATION_CONFIGS = [
     TfidfConfig("ltc.ltc + stopwords + stemming", "ltc.ltc", stem=True, stopwords=True),
     TfidfConfig("lnc.ltc + stopwords + stemming", "lnc.ltc", stem=True, stopwords=True),
     TfidfConfig("lsc.lsc + stopwords + stemming", "lsc.lsc", stem=True, stopwords=True),
+    # Classical NLP on top: POS tagging drives lemmatization and noun-phrase chunking.
+    TfidfConfig("lsc.lsc + stopwords + POS lemmatization", "lsc.lsc", stem=False, stopwords=True, lemmatize=True),
+    TfidfConfig("lsc.lsc + stopwords + stemming + noun phrases", "lsc.lsc", stem=True, stopwords=True, phrases=True),
+    TfidfConfig("lsc.lsc + stopwords + POS lemmatization + noun phrases", "lsc.lsc", stem=False, stopwords=True,
+                lemmatize=True, phrases=True),
 ]
 
 
@@ -63,10 +79,15 @@ def write_trec_run(run: Run, path: Path, tag: str) -> None:
     path.write_text("\n".join(lines) + "\n", encoding="utf-8")
 
 
+def materialize(system: Retriever | Callable[[], Retriever]) -> Retriever:
+    """Systems are given as retrievers or as factories, so large models are loaded only when their turn comes."""
+    return system if isinstance(system, Retriever) else system()
+
+
 def run_with_latency(retriever: Retriever, queries: dict[str, str], k: int) -> tuple[Run, list[float]]:
     """Answer each query on its own (as an interactive user would), timing each in ms."""
     run, latencies = {}, []
-    for qid, text in queries.items():
+    for qid, text in tqdm(queries.items(), desc=getattr(retriever, "name", None), leave=False, mininterval=5):
         start = time.perf_counter()
         run[qid] = dict(retriever.search(text, k))
         latencies.append((time.perf_counter() - start) * 1000)
@@ -80,11 +101,13 @@ def tfidf_ablation(doc_ids, texts, queries, qrels) -> tuple[pd.DataFrame, TfidfC
         r = config.build().index(doc_ids, texts)
         means = evaluate_run(r.search_batch(queries, RUN_DEPTH), qrels).mean()
         rows.append({"config": config.label, "scheme": config.scheme, "stemming": config.stem,
-                     "stopwords": config.stopwords, **means[MAIN_METRICS].to_dict()})
+                     "stopwords": config.stopwords, "lemmatization": config.lemmatize,
+                     "noun phrases": config.phrases, **means[MAIN_METRICS].to_dict()})
     sk = SklearnTfidfRetriever(Analyzer(stem=True, stopwords=True)).index(doc_ids, texts)
     means = evaluate_run(sk.search_batch(queries, RUN_DEPTH), qrels).mean()
     rows.append({"config": "scikit-learn TfidfVectorizer (reference = lsc.lsc)", "scheme": "lsc.lsc",
-                 "stemming": True, "stopwords": True, **means[MAIN_METRICS].to_dict()})
+                 "stemming": True, "stopwords": True, "lemmatization": False, "noun phrases": False,
+                 **means[MAIN_METRICS].to_dict()})
 
     table = pd.DataFrame(rows)
     best_idx = int(table.iloc[: len(ABLATION_CONFIGS)]["nDCG@10"].idxmax())
@@ -124,28 +147,43 @@ def evaluate(results_dir: Path = RESULTS_DIR) -> None:
     minilm = DenseRetriever(MINILM, name="Dense: all-MiniLM-L6-v2").index(doc_ids, texts)
     _log(f"Encoding corpus with {BGE}")
     bge = DenseRetriever(BGE, query_prompt=BGE_QUERY_PROMPT, name="Dense: bge-small-en-v1.5").index(doc_ids, texts)
-    cross_encoder = CrossEncoderReranker(CROSS_ENCODER)
-    systems: dict[str, Retriever] = {
+    doc_texts = dict(zip(doc_ids, texts))
+
+    def reranked(reranker_factory, name: str) -> Callable[[], Retriever]:
+        return lambda: RerankRetriever(tfidf, reranker_factory(), doc_texts, depth=RUN_DEPTH, name=name)
+
+    systems: dict[str, Retriever | Callable[[], Retriever]] = {
         "tfidf": tfidf,
         "dense-minilm": minilm,
         "dense-bge": bge,
         "hybrid-rrf": RRFHybrid([tfidf, bge], name="Hybrid: TF-IDF + bge (RRF)"),
-        "tfidf-ce": RerankRetriever(tfidf, cross_encoder, dict(zip(doc_ids, texts)), depth=RUN_DEPTH,
-                                    name="TF-IDF → cross-encoder"),
+        "tfidf-ce": reranked(lambda: CrossEncoderReranker(CROSS_ENCODER), "TF-IDF → cross-encoder"),
+        "tfidf-llm-zs": reranked(lambda: LLMReranker(LLM_ZERO_SHOT), "TF-IDF → LLM zero-shot (Qwen3-0.6B)"),
+        "tfidf-llm": reranked(lambda: LLMReranker(LLM_RERANKER), "TF-IDF → LLM reranker (Qwen3-Reranker-0.6B)"),
     }
     device = str(minilm.model.device)
 
-    # 3. Retrieve + evaluate on test.
+    # 3. Retrieve + evaluate on test. Rerankers are loaded one at a time and freed after their run,
+    # so the two LLMs never share the 4 GB GPU.
     per_query: dict[str, pd.DataFrame] = {}
     latencies: dict[str, list[float]] = {}
-    for key, system in systems.items():
+    names: dict[str, str] = {}
+    params: dict[str, int] = {}
+    for key, entry in systems.items():
+        system = materialize(entry)
+        names[key] = system.name
+        if isinstance(system, RerankRetriever):
+            params[key] = system.reranker.n_params
         _log(f"Retrieving: {system.name}")
         system.search(next(iter(test_queries.values())), RUN_DEPTH)  # warm-up (CUDA init, caches)
         run, latencies[key] = run_with_latency(system, test_queries, RUN_DEPTH)
         write_trec_run(run, results_dir / "runs" / f"{key}.trec", key)
         per_query[key] = evaluate_run(run, test_qrels)
+        if isinstance(system, RerankRetriever):
+            del system
+            gc.collect()
+            torch.cuda.empty_cache()
 
-    names = {key: s.name for key, s in systems.items()}
     _write_metrics(per_query, names, results_dir)
     _write_significance(per_query, names, results_dir)
     _write_efficiency(results_dir, names, latencies, device, {
@@ -153,15 +191,16 @@ def evaluate(results_dir: Path = RESULTS_DIR) -> None:
         "dense-minilm": (minilm.index_seconds, minilm.nbytes, minilm.n_params),
         "dense-bge": (bge.index_seconds, bge.nbytes, bge.n_params),
         "hybrid-rrf": (tfidf_seconds + bge.index_seconds, tfidf.nbytes + bge.nbytes, bge.n_params),
-        "tfidf-ce": (tfidf_seconds, tfidf.nbytes, cross_encoder.n_params),
+        **{key: (tfidf_seconds, tfidf.nbytes, n) for key, n in params.items()},
     })
     (results_dir / "config.json").write_text(json.dumps({
         "dataset": "BEIR SciFact",
         "n_docs": len(doc_ids),
         "n_test_queries": len(test_queries),
         "n_train_queries": len(train_queries),
-        "tfidf": {"label": best.label, "scheme": best.scheme, "stem": best.stem, "stopwords": best.stopwords},
-        "models": {"minilm": MINILM, "bge": BGE, "bge_query_prompt": BGE_QUERY_PROMPT, "cross_encoder": CROSS_ENCODER},
+        "tfidf": {"label": best.label, "scheme": best.scheme, **best.analyzer().config()},
+        "models": {"minilm": MINILM, "bge": BGE, "bge_query_prompt": BGE_QUERY_PROMPT, "cross_encoder": CROSS_ENCODER,
+                   "llm_zero_shot": LLM_ZERO_SHOT, "llm_reranker": LLM_RERANKER, "llm_instruction": INSTRUCTION},
         "run_depth": RUN_DEPTH,
         "rrf_k": 60,
         "systems": names,
@@ -197,8 +236,8 @@ def _write_metrics(per_query: dict[str, pd.DataFrame], names: dict[str, str], re
 def _write_significance(per_query: dict[str, pd.DataFrame], names: dict[str, str], results_dir: Path) -> None:
     parts = [(
         "Each system vs. the TF-IDF baseline on the same test queries. Two-sided Wilcoxon signed-rank "
-        "(zero differences dropped) and paired t-test; Holm correction over the 4 comparisons per metric "
-        "applied to the Wilcoxon p-values. W/T/L = queries where the system scores higher / equal / lower.\n"
+        f"(zero differences dropped) and paired t-test; Holm correction over the {len(per_query) - 1} comparisons "
+        "per metric applied to the Wilcoxon p-values. W/T/L = queries where the system scores higher / equal / lower.\n"
     )]
     for metric in SIGNIFICANCE_METRICS:
         base = per_query["tfidf"][metric]

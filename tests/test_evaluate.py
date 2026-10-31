@@ -44,6 +44,16 @@ def test_ablation_selects_best_own_config_and_matches_sklearn():
     assert sk["nDCG@10"] == pytest.approx(lsc["nDCG@10"])
 
 
+def test_ablation_covers_pos_lemmatization_and_noun_phrases():
+    assert any(c.lemmatize and not c.stem for c in ABLATION_CONFIGS)
+    assert any(c.phrases for c in ABLATION_CONFIGS)
+    config = next(c for c in ABLATION_CONFIGS if c.phrases)
+    retriever = config.build()
+    assert retriever.analyzer.config() == {"stem": config.stem, "stopwords": config.stopwords,
+                                           "lemmatize": config.lemmatize, "phrases": True}
+    assert retriever.scheme == config.scheme
+
+
 def test_result_files_are_utf8_for_non_ascii_system_names(tmp_path):
     import pandas as pd
 
@@ -60,3 +70,34 @@ def test_result_files_are_utf8_for_non_ascii_system_names(tmp_path):
     _write_significance(per_query, names, tmp_path)
     assert "TF-IDF → cross-encoder" in (tmp_path / "metrics.md").read_text(encoding="utf-8")
     assert "TF-IDF → cross-encoder" in (tmp_path / "significance.md").read_text(encoding="utf-8")
+
+
+def test_significance_note_counts_the_comparisons(tmp_path):
+    import pandas as pd
+
+    from irsys.evaluate import _write_significance
+
+    metrics = ["nDCG@10", "R@100"]
+    per_query = {k: pd.DataFrame({m: [0.5, v, 1.0] for m in metrics}, index=["q1", "q2", "q3"])
+                 for k, v in [("tfidf", 0.0), ("a", 1.0), ("b", 0.5)]}
+    _write_significance(per_query, {"tfidf": "TF-IDF", "a": "A", "b": "B"}, tmp_path)
+    assert "Holm correction over the 2 comparisons per metric" in (tmp_path / "significance.md").read_text(
+        encoding="utf-8")
+
+
+def test_systems_can_be_built_lazily_one_at_a_time():
+    from irsys.evaluate import materialize
+
+    built = []
+
+    class _Fixed(Retriever):
+        def search(self, query, k=10):
+            return []
+
+    def factory():
+        built.append(1)
+        return _Fixed()
+
+    eager = _Fixed()
+    assert materialize(eager) is eager
+    assert isinstance(materialize(factory), _Fixed) and built == [1]
