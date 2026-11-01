@@ -2,6 +2,9 @@
 
 ``ranking`` is a list of doc ids, best first. ``qrels`` maps doc id -> relevance grade;
 grade > 0 means relevant. nDCG uses the grade as a linear gain with a log2 discount.
+
+The evaluation reports exactly six metrics: nDCG@k, MAP, MRR, Precision@k, Recall@k and
+F1@k, at k = 5 and 10. MAP and MRR use the whole ranking (every system returns its top 100).
 """
 
 from math import log2
@@ -10,7 +13,9 @@ import pandas as pd
 
 from irsys.base import Run
 
-RECALL_KS = (1, 2, 3, 5, 10, 20, 50, 100)
+CUTOFFS = (5, 10)  # k for nDCG@k, P@k, R@k and F1@k
+METRICS = [*(f"nDCG@{k}" for k in CUTOFFS), "MAP", "MRR",
+           *(f"{name}@{k}" for name in ("P", "R", "F1") for k in CUTOFFS)]
 
 
 def _relevant(qrels: dict[str, int]) -> set[str]:
@@ -27,7 +32,13 @@ def recall_at_k(ranking: list[str], qrels: dict[str, int], k: int) -> float:
     return sum(d in rel for d in ranking[:k]) / len(rel) if rel else 0.0
 
 
-def reciprocal_rank(ranking: list[str], qrels: dict[str, int], k: int) -> float:
+def f1_at_k(ranking: list[str], qrels: dict[str, int], k: int) -> float:
+    """Harmonic mean of P@k and R@k (0 when both are 0)."""
+    p, r = precision_at_k(ranking, qrels, k), recall_at_k(ranking, qrels, k)
+    return 2 * p * r / (p + r) if p + r > 0 else 0.0
+
+
+def reciprocal_rank(ranking: list[str], qrels: dict[str, int], k: int | None = None) -> float:
     rel = _relevant(qrels)
     for rank, d in enumerate(ranking[:k], start=1):
         if d in rel:
@@ -35,7 +46,7 @@ def reciprocal_rank(ranking: list[str], qrels: dict[str, int], k: int) -> float:
     return 0.0
 
 
-def average_precision(ranking: list[str], qrels: dict[str, int], k: int) -> float:
+def average_precision(ranking: list[str], qrels: dict[str, int], k: int | None = None) -> float:
     rel = _relevant(qrels)
     if not rel:
         return 0.0
@@ -55,14 +66,12 @@ def ndcg_at_k(ranking: list[str], qrels: dict[str, int], k: int) -> float:
 
 
 def query_metrics(ranking: list[str], qrels: dict[str, int]) -> dict[str, float]:
-    row = {
-        "nDCG@10": ndcg_at_k(ranking, qrels, 10),
-        "MAP@100": average_precision(ranking, qrels, 100),
-        "MRR@10": reciprocal_rank(ranking, qrels, 10),
-        "P@10": precision_at_k(ranking, qrels, 10),
-    }
-    row.update({f"R@{k}": recall_at_k(ranking, qrels, k) for k in RECALL_KS})
-    return row
+    row = {f"nDCG@{k}": ndcg_at_k(ranking, qrels, k) for k in CUTOFFS}
+    row["MAP"] = average_precision(ranking, qrels)
+    row["MRR"] = reciprocal_rank(ranking, qrels)
+    for name, fn in (("P", precision_at_k), ("R", recall_at_k), ("F1", f1_at_k)):
+        row.update({f"{name}@{k}": fn(ranking, qrels, k) for k in CUTOFFS})
+    return {m: row[m] for m in METRICS}
 
 
 def evaluate_run(run: Run, qrels: dict[str, dict[str, int]]) -> pd.DataFrame:
@@ -77,4 +86,4 @@ def evaluate_run(run: Run, qrels: dict[str, dict[str, int]]) -> pd.DataFrame:
         scored = run.get(qid, {})
         ranking = sorted(scored, key=scored.get, reverse=True)  # stable: ties keep run order
         rows[qid] = query_metrics(ranking, judged)
-    return pd.DataFrame.from_dict(rows, orient="index")
+    return pd.DataFrame.from_dict(rows, orient="index", columns=METRICS)

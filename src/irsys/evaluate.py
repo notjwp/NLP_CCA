@@ -18,10 +18,10 @@ from irsys.data import RESULTS_DIR, doc_text, load_scifact
 from irsys.dense import DenseRetriever
 from irsys.fusion import RRFHybrid
 from irsys.llm import INSTRUCTION, LLMReranker
-from irsys.metrics import evaluate_run
+from irsys.metrics import METRICS, evaluate_run
 from irsys.preprocess import Analyzer
 from irsys.rerank import CrossEncoderReranker, RerankRetriever
-from irsys.stats import bootstrap_ci, paired_tests
+from irsys.stats import paired_tests
 from irsys.tfidf import SklearnTfidfRetriever, TfidfRetriever
 
 MINILM = "sentence-transformers/all-MiniLM-L6-v2"
@@ -31,8 +31,7 @@ CROSS_ENCODER = "cross-encoder/ms-marco-MiniLM-L-6-v2"
 LLM_ZERO_SHOT = "Qwen/Qwen3-0.6B"  # general chat LLM, prompted only
 LLM_RERANKER = "Qwen/Qwen3-Reranker-0.6B"  # same LLM, fine-tuned for relevance judgements
 RUN_DEPTH = 100  # docs kept per query; also the reranking depth
-SIGNIFICANCE_METRICS = ("nDCG@10", "R@100")
-MAIN_METRICS = ["nDCG@10", "MAP@100", "MRR@10", "P@10", "R@10", "R@100"]
+SIGNIFICANCE_METRIC = "nDCG@10"  # the main metric; the only one tested for significance
 
 
 @dataclass(frozen=True)
@@ -102,12 +101,12 @@ def tfidf_ablation(doc_ids, texts, queries, qrels) -> tuple[pd.DataFrame, TfidfC
         means = evaluate_run(r.search_batch(queries, RUN_DEPTH), qrels).mean()
         rows.append({"config": config.label, "scheme": config.scheme, "stemming": config.stem,
                      "stopwords": config.stopwords, "lemmatization": config.lemmatize,
-                     "noun phrases": config.phrases, **means[MAIN_METRICS].to_dict()})
+                     "noun phrases": config.phrases, **means[METRICS].to_dict()})
     sk = SklearnTfidfRetriever(Analyzer(stem=True, stopwords=True)).index(doc_ids, texts)
     means = evaluate_run(sk.search_batch(queries, RUN_DEPTH), qrels).mean()
     rows.append({"config": "scikit-learn TfidfVectorizer (reference = lsc.lsc)", "scheme": "lsc.lsc",
                  "stemming": True, "stopwords": True, "lemmatization": False, "noun phrases": False,
-                 **means[MAIN_METRICS].to_dict()})
+                 **means[METRICS].to_dict()})
 
     table = pd.DataFrame(rows)
     best_idx = int(table.iloc[: len(ABLATION_CONFIGS)]["nDCG@10"].idxmax())
@@ -131,11 +130,7 @@ def evaluate(results_dir: Path = RESULTS_DIR) -> None:
     # 1. Choose the TF-IDF configuration on the train split only.
     _log("TF-IDF ablation on the train split")
     ablation, best = tfidf_ablation(doc_ids, texts, train_queries, train_qrels)
-    (results_dir / "ablation_train.md").write_text(
-        f"TF-IDF variants on the SciFact **train** split ({len(train_queries)} queries). "
-        f"Selected by nDCG@10: **{best.label}**.\n\n" + _md(ablation),
-        encoding="utf-8",
-    )
+    _write_ablation(results_dir, ablation, best, len(train_queries))
     _log(f"Selected TF-IDF config: {best.label}")
 
     # 2. Build every system.
@@ -168,12 +163,9 @@ def evaluate(results_dir: Path = RESULTS_DIR) -> None:
     per_query: dict[str, pd.DataFrame] = {}
     latencies: dict[str, list[float]] = {}
     names: dict[str, str] = {}
-    params: dict[str, int] = {}
     for key, entry in systems.items():
         system = materialize(entry)
         names[key] = system.name
-        if isinstance(system, RerankRetriever):
-            params[key] = system.reranker.n_params
         _log(f"Retrieving: {system.name}")
         system.search(next(iter(test_queries.values())), RUN_DEPTH)  # warm-up (CUDA init, caches)
         run, latencies[key] = run_with_latency(system, test_queries, RUN_DEPTH)
@@ -186,13 +178,14 @@ def evaluate(results_dir: Path = RESULTS_DIR) -> None:
 
     _write_metrics(per_query, names, results_dir)
     _write_significance(per_query, names, results_dir)
-    _write_efficiency(results_dir, names, latencies, device, {
-        "tfidf": (tfidf_seconds, tfidf.nbytes, 0),
-        "dense-minilm": (minilm.index_seconds, minilm.nbytes, minilm.n_params),
-        "dense-bge": (bge.index_seconds, bge.nbytes, bge.n_params),
-        "hybrid-rrf": (tfidf_seconds + bge.index_seconds, tfidf.nbytes + bge.nbytes, bge.n_params),
-        **{key: (tfidf_seconds, tfidf.nbytes, n) for key, n in params.items()},
-    })
+    build_seconds = {"tfidf": tfidf_seconds, "dense-minilm": minilm.index_seconds, "dense-bge": bge.index_seconds,
+                     "hybrid-rrf": tfidf_seconds + bge.index_seconds}  # rerankers build only the TF-IDF index
+    _write_efficiency(results_dir, [{
+        "System": names[key],
+        "Index build (s)": build_seconds.get(key, tfidf_seconds),
+        "Mean time per claim (ms)": float(np.mean(latencies[key])),
+        "Device": "cpu" if key == "tfidf" else device,
+    } for key in systems])
     (results_dir / "config.json").write_text(json.dumps({
         "dataset": "BEIR SciFact",
         "n_docs": len(doc_ids),
@@ -212,62 +205,98 @@ def evaluate(results_dir: Path = RESULTS_DIR) -> None:
     _log(f"Done. Results in {results_dir}")
 
 
+def _write_ablation(results_dir: Path, table: pd.DataFrame, best: "TfidfConfig", n_queries: int) -> None:
+    (results_dir / "ablation_train.md").write_text(
+        f"TF-IDF variants on the SciFact **train** split ({n_queries} queries). "
+        f"Selected by nDCG@10: **{best.label}**.\n\n" + _md(table),
+        encoding="utf-8",
+    )
+
+
 def _write_metrics(per_query: dict[str, pd.DataFrame], names: dict[str, str], results_dir: Path) -> None:
     long = pd.concat({k: df for k, df in per_query.items()}, names=["system", "qid"]).reset_index()
     long.to_csv(results_dir / "per_query.csv", index=False)
 
-    rows = []
-    for key, df in per_query.items():
-        lo, hi = bootstrap_ci(df["nDCG@10"])
-        rows.append({"system": key, "name": names[key], **df.mean().to_dict(), "nDCG@10_ci_lo": lo, "nDCG@10_ci_hi": hi})
-    metrics = pd.DataFrame(rows)
+    metrics = pd.DataFrame([{"system": key, "name": names[key], **df[METRICS].mean().to_dict()}
+                            for key, df in per_query.items()])
     metrics.to_csv(results_dir / "metrics.csv", index=False)
 
-    table = metrics[["name", *MAIN_METRICS]].rename(columns={"name": "System"})
-    table.insert(2, "nDCG@10 95% CI", [f"[{lo:.3f}, {hi:.3f}]" for lo, hi in
-                                       zip(metrics["nDCG@10_ci_lo"], metrics["nDCG@10_ci_hi"])])
+    table = metrics[["name", *METRICS]].rename(columns={"name": "System"})
     n = len(next(iter(per_query.values())))
     (results_dir / "metrics.md").write_text(
-        f"Mean over the {n} SciFact test queries. CI: 10,000-sample percentile bootstrap over queries.\n\n" + _md(table),
+        f"Mean over the {n} SciFact test queries. k = 5 and 10; MAP and MRR use each system's whole top-{RUN_DEPTH} "
+        "ranking.\n\n" + _md(table),
         encoding="utf-8",
     )
 
 
 def _write_significance(per_query: dict[str, pd.DataFrame], names: dict[str, str], results_dir: Path) -> None:
-    parts = [(
-        "Each system vs. the TF-IDF baseline on the same test queries. Two-sided Wilcoxon signed-rank "
-        f"(zero differences dropped) and paired t-test; Holm correction over the {len(per_query) - 1} comparisons "
-        "per metric applied to the Wilcoxon p-values. W/T/L = queries where the system scores higher / equal / lower.\n"
-    )]
-    for metric in SIGNIFICANCE_METRICS:
-        base = per_query["tfidf"][metric]
-        table = paired_tests(base, {k: df[metric] for k, df in per_query.items() if k != "tfidf"})
-        table["system"] = table["system"].map(names)
-        table["W/T/L"] = [f"{w}/{t}/{l}" for w, t, l in zip(table["wins"], table["ties"], table["losses"])]
-        table["significant (α=0.05)"] = np.where(table["holm_p"] < 0.05, "yes", "no")
-        out = table[["system", "baseline_mean", "system_mean", "delta", "W/T/L", "wilcoxon_p", "ttest_p",
-                     "holm_p", "significant (α=0.05)"]].rename(columns={"baseline_mean": "TF-IDF mean",
-                                                                        "system_mean": "system mean"})
-        parts.append(f"\n## {metric}\n\n" + out.to_markdown(index=False, floatfmt=".4g") + "\n")
-    (results_dir / "significance.md").write_text("".join(parts), encoding="utf-8")
+    base = per_query["tfidf"][SIGNIFICANCE_METRIC]
+    table = paired_tests(base, {k: df[SIGNIFICANCE_METRIC] for k, df in per_query.items() if k != "tfidf"})
+    table["system"] = table["system"].map(names)
+    table["W/T/L"] = [f"{w}/{t}/{l}" for w, t, l in zip(table["wins"], table["ties"], table["losses"])]
+    table["significant (α=0.05)"] = np.where(table["holm_p"] < 0.05, "yes", "no")
+    out = table[["system", "baseline_mean", "system_mean", "delta", "W/T/L", "wilcoxon_p", "holm_p",
+                 "significant (α=0.05)"]].rename(columns={"baseline_mean": "TF-IDF mean", "system_mean": "system mean"})
+    (results_dir / "significance.md").write_text(
+        f"Each system vs. the TF-IDF baseline on {SIGNIFICANCE_METRIC}, on the same test queries: two-sided Wilcoxon "
+        f"signed-rank test (zero differences dropped), Holm correction over the {len(per_query) - 1} comparisons. "
+        "W/T/L = queries where the system scores higher / equal / lower.\n\n"
+        + out.to_markdown(index=False, floatfmt=".4g") + "\n",
+        encoding="utf-8",
+    )
 
 
-def _write_efficiency(results_dir, names, latencies, device, build) -> None:
-    rows = []
-    for key, (index_s, nbytes, params) in build.items():
-        lat = np.asarray(latencies[key])
-        rows.append({
-            "System": names[key],
-            "Index build (s)": index_s,
-            "Index size (MB)": nbytes / 2**20,
-            "Model params (M)": params / 1e6,
-            "Mean latency (ms)": lat.mean(),
-            "p95 latency (ms)": np.percentile(lat, 95),
-            "Device": "cpu" if key == "tfidf" else device,
-        })
+def _write_efficiency(results_dir: Path, rows: list[dict]) -> None:
     (results_dir / "efficiency.md").write_text(
-        "Index build = TF-IDF indexing or corpus embedding time. Latency = one query at a time, "
-        f"top-{RUN_DEPTH}, after a warm-up query. Hybrid/rerank include their first-stage cost.\n\n"
+        "Index build = TF-IDF indexing or corpus embedding time. Time per claim = one query at a time, "
+        f"top-{RUN_DEPTH}, after a warm-up query; hybrid and rerankers include their first stage.\n\n"
         + _md(pd.DataFrame(rows), floatfmt=".2f"),
         encoding="utf-8",
     )
+
+
+def read_markdown_table(text: str) -> list[dict[str, str]]:
+    """Rows of the first pipe table in ``text`` (header row, alignment row, then data) as strings."""
+    lines = [line.strip() for line in text.splitlines() if line.strip().startswith("|")]
+
+    def cells(line: str) -> list[str]:
+        return [c.strip() for c in line.strip("|").split("|")]
+
+    return [dict(zip(cells(lines[0]), cells(line))) for line in lines[2:]] if len(lines) > 2 else []
+
+
+def rescore(results_dir: Path = RESULTS_DIR, qrels: dict[str, dict[str, int]] | None = None,
+            ablation: bool = True) -> None:
+    """Recompute every metric file from the saved runs, without loading any model.
+
+    Rankings come from ``runs/*.trec``; timings are carried over from ``efficiency.md`` (they were
+    measured when the runs were made). With ``ablation``, the TF-IDF train-split table is rebuilt too.
+    """
+    from irsys.analysis import read_trec_run
+
+    names = json.loads((results_dir / "config.json").read_text(encoding="utf-8"))["systems"]
+    if qrels is None:
+        _, _, qrels = load_scifact("test")
+    per_query = {}
+    for key in names:
+        ranked = read_trec_run(results_dir / "runs" / f"{key}.trec")
+        run = {qid: {d: float(len(docs) - i) for i, d in enumerate(docs)} for qid, docs in ranked.items()}
+        per_query[key] = evaluate_run(run, qrels)
+    _write_metrics(per_query, names, results_dir)
+    _write_significance(per_query, names, results_dir)
+
+    timings = read_markdown_table((results_dir / "efficiency.md").read_text(encoding="utf-8"))
+    _write_efficiency(results_dir, [{
+        "System": row["System"],
+        "Index build (s)": float(row["Index build (s)"]),
+        "Mean time per claim (ms)": float(row.get("Mean time per claim (ms)", row.get("Mean latency (ms)"))),
+        "Device": row["Device"],
+    } for row in timings])
+
+    if ablation:
+        corpus, train_queries, train_qrels = load_scifact("train")
+        doc_ids = list(corpus)
+        table, best = tfidf_ablation(doc_ids, [doc_text(corpus[d]) for d in doc_ids], train_queries, train_qrels)
+        _write_ablation(results_dir, table, best, len(train_queries))
+    _log(f"Rescored from saved runs. Results in {results_dir}")

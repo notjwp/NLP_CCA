@@ -1,4 +1,4 @@
-"""Command line: ``irsys evaluate | analyze | search "query" | demo``."""
+"""Command line: ``irsys evaluate | rescore | analyze | search "query" | demo``."""
 
 import argparse
 import json
@@ -9,6 +9,7 @@ def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(prog="irsys", description="TF-IDF/cosine vs. semantic search on BEIR SciFact")
     sub = parser.add_subparsers(dest="command", required=True)
     sub.add_parser("evaluate", help="run the TF-IDF ablation (train) and all systems (test); write results/")
+    sub.add_parser("rescore", help="recompute every metric file from the saved runs in results/ (no models)")
     sub.add_parser("analyze", help="figures and example queries from results/")
     search = sub.add_parser("search", help="show TF-IDF and dense results side by side for one query")
     search.add_argument("query")
@@ -68,6 +69,10 @@ def main(argv: list[str] | None = None) -> None:
         from irsys.evaluate import evaluate
 
         evaluate()
+    elif args.command == "rescore":
+        from irsys.evaluate import rescore
+
+        rescore()
     elif args.command == "analyze":
         from irsys.analysis import analyze
 

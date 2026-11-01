@@ -2,7 +2,7 @@ import numpy as np
 import pandas as pd
 import pytest
 
-from irsys.stats import bootstrap_ci, holm, paired_tests
+from irsys.stats import holm, paired_tests
 
 
 def test_holm_step_down_adjustment():
@@ -12,17 +12,6 @@ def test_holm_step_down_adjustment():
 
 def test_holm_caps_at_one():
     assert holm([0.6, 0.9]) == pytest.approx([1.0, 1.0])
-
-
-def test_bootstrap_ci_brackets_the_mean():
-    values = np.random.default_rng(1).random(300)
-    lo, hi = bootstrap_ci(values, n_resamples=2000, seed=0)
-    assert lo < values.mean() < hi
-    assert hi - lo < 0.15
-
-
-def test_bootstrap_ci_of_constant_is_a_point():
-    assert bootstrap_ci(np.full(50, 0.5)) == pytest.approx((0.5, 0.5))
 
 
 def _scores(seed, shift):
@@ -39,10 +28,11 @@ def test_paired_tests_detect_a_real_improvement_and_count_wins():
     table = paired_tests(base, {"better": better, "same": same})
     row = table.set_index("system").loc["better"]
     assert row["delta"] == pytest.approx(better.mean() - base.mean())
-    assert row["wilcoxon_p"] < 0.001 and row["ttest_p"] < 0.001 and row["holm_p"] < 0.05
+    assert row["wilcoxon_p"] < 0.001 and row["holm_p"] < 0.05
+    assert "ttest_p" not in table.columns  # the Wilcoxon test is the only significance test
     assert row["wins"] + row["ties"] + row["losses"] == 200
     same_row = table.set_index("system").loc["same"]
-    assert same_row["wilcoxon_p"] == 1.0 and same_row["ttest_p"] == 1.0  # all-zero differences
+    assert same_row["wilcoxon_p"] == 1.0  # all-zero differences
     assert same_row["ties"] == 200
 
 

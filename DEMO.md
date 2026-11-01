@@ -50,7 +50,7 @@ The talk follows the slides in `presentation/slides.pdf` (kept out of git):
 | Slides 1–5 | Presenter 1 | The task, the classical TF-IDF system, the NLP steps, how the systems are judged; then the handover |
 | Slides 6–7 | Presenter 2 | The AI side and how the LLM scores |
 | Slide 8 | Presenter 2 | **This demo**, steps 0–3 below (about 3 minutes) |
-| Slides 9–12 | Presenter 2 | Results, error analysis, prompting vs. fine-tuning, conclusions |
+| Slides 9–13 | Presenter 2 | Results, all six metrics, error analysis, prompting vs. fine-tuning, conclusions |
 
 The slides already introduce the task and present the results, so inside the talk the demo runs steps 0–3 and
 skips steps 4–5. Use steps 4–5 only when demoing without the slides.
@@ -117,19 +117,20 @@ also work well: `cancer cells hide from the immune system` (tab 2 shows *hide* i
 only the 300 benchmark claims have known answers (the 🎲 button picks one).
 
 ### 4 · Results on all 300 test claims (1.5 min; skip when the slides follow)
-**Tab 4** has a plain-language guide above the table. The grade is **nDCG@10**: 1 = the correct paper is
-always first, 0.5 ≈ usually third, 0 = not in the top 10.
+**Tab 4** has a plain-language guide, then two tables: the six metrics (nDCG@k, MAP, MRR, Precision@k,
+Recall@k, F1@k at k = 5 and 10), then speed and significance. Point at nDCG@10, the main grade: 1 = the
+correct paper is always first, 0.5 ≈ usually third, 0 = not in the top 10.
 
-| | nDCG@10 | Time per claim |
-|---|---|---|
-| Word matching · TF-IDF (from scratch) | 0.659 | **0.17 ms** on the CPU |
-| Meaning matching · bge-small | 0.713 | 12 ms on the GPU |
-| Combined (hybrid) | 0.721 | 14 ms |
-| LLM zero-shot (general Qwen3, just prompted) | 0.276 | 5.7 s |
-| **LLM reranker (Qwen3 trained for this)** | **0.772** | 5.8 s |
+| | nDCG@10 | MAP | MRR | Time per claim |
+|---|---|---|---|---|
+| Word matching · TF-IDF (from scratch) | 0.659 | 0.609 | 0.623 | **0.17 ms** on the CPU |
+| Meaning matching · bge-small | 0.713 | 0.674 | 0.687 | 12 ms on the GPU |
+| Combined (hybrid) | 0.721 | 0.674 | 0.686 | 14 ms |
+| LLM zero-shot (general Qwen3, just prompted) | 0.276 | 0.239 | 0.246 | 5.7 s |
+| **LLM reranker (Qwen3 trained for this)** | **0.772** | **0.734** | **0.743** | 5.8 s |
 
-> "The LLM reranker is the best: 17% better than our TF-IDF, and significantly better than every other
-> system. But TF-IDF is about 34,000 times faster, needs no GPU, and every score can be explained word by
+> "The LLM reranker is the best on all six metrics: 17% better than our TF-IDF on nDCG@10, and
+> significantly better than every other system. But TF-IDF is about 34,000 times faster, needs no GPU, and every score can be explained word by
 > word, as tab 2 showed. And the same small LLM, only *prompted*, does far worse than TF-IDF: it says 'yes'
 > to every single paper. Training on the task matters more than the model being an LLM."
 
@@ -158,7 +159,7 @@ The other two examples, if there's time:
 | Why is the zero-shot LLM so bad? | It answers "yes" to 100% of the 29,889 candidate papers, so its ranking is close to random. The same model fine-tuned for relevance says "yes" to only 2.3% of candidates but to 75% of the correct ones. A 0.6B model can't follow "answer yes or no" discriminatively from the prompt alone; training on the task fixes that. |
 | Why does the LLM still miss some? | It fails on 31 claims; on 20 of them TF-IDF never put the correct paper in its top 100, so the LLM never saw it. A better first stage (the hybrid) would fix many of these. |
 | Why not a bigger LLM? | The laptop GPU has 4 GB. A 0.6B model already takes ~5 s per claim to read 100 papers; a 7B model would not fit, and an API model would cost money per query. |
-| Why only nDCG@10? | It's the standard BEIR grade and rewards putting the correct paper high. MAP, MRR and precision are in the report and rank the systems in practically the same order. |
+| Which metrics did you use? | Six: nDCG@k, MAP, MRR, Precision@k, Recall@k and F1@k, at k = 5 and 10. nDCG@10 is the main one (the BEIR standard); the others rank the systems in almost the same order. Precision and F1 are low for everyone because most claims have only one correct paper (P@10 can be at most 0.1). |
 | How does the hybrid merge two lists? | Reciprocal Rank Fusion: score = Σ 1/(60 + position). It combines **positions**, not scores, so the two systems' different score scales never need matching. |
 | Is the improvement significant? | Yes. A statistical test on the same 300 claims (Wilcoxon) gives p ≈ 5×10⁻¹¹ for the LLM reranker, far below 0.05, so it is not luck. bge and the hybrid are also really better than TF-IDF; MiniLM and the cross-encoder are not. (Details, including the correction for running several tests, are in the report.) |
 | Does it need a GPU? | Only the AI side. TF-IDF runs in a fraction of a millisecond on the CPU. `irsys demo --no-llm` runs without the LLM. |

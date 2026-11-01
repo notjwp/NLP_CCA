@@ -26,6 +26,7 @@ uv run python -c "import torch; print(torch.cuda.is_available())"
 
 ```sh
 uv run irsys evaluate      # download data, TF-IDF ablation (train), all systems (test) -> results/
+uv run irsys rescore       # recompute every metric file from the saved runs (seconds, no models)
 uv run irsys analyze       # figures, vocabulary-overlap and error analysis, examples -> results/
 uv run irsys search "vitamin D deficiency increases risk of fractures" -k 5   # side-by-side, in the terminal
 uv run irsys demo          # interactive presentation demo in the browser (see DEMO.md)
@@ -66,8 +67,8 @@ uv run pytest                 # + smoke tests that download data and run the rea
 | `src/irsys/rerank.py` | Cross-encoder reranking of first-stage candidates |
 | `src/irsys/llm.py` | LLM reranking: a yes/no relevance prompt, scored from the next-token probabilities |
 | `src/irsys/fusion.py` | Reciprocal Rank Fusion hybrid |
-| `src/irsys/metrics.py` | nDCG, MAP, MRR, P@k, Recall@k (from scratch) |
-| `src/irsys/stats.py` | Wilcoxon / paired t-test, Holm correction, bootstrap CIs |
+| `src/irsys/metrics.py` | The six metrics, from scratch: nDCG@k, MAP, MRR, Precision@k, Recall@k, F1@k (k = 5, 10) |
+| `src/irsys/stats.py` | Wilcoxon signed-rank test with Holm correction |
 | `src/irsys/evaluate.py` | The experiment: ablation on train, all systems on test, result files |
 | `src/irsys/analysis.py` | Figures, vocabulary-overlap analysis, error analysis, qualitative examples |
 | `src/irsys/demo.py` | Interactive presentation demo (Gradio) |

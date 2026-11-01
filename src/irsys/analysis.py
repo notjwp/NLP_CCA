@@ -15,7 +15,6 @@ from matplotlib import font_manager
 from sklearn.feature_extraction.text import ENGLISH_STOP_WORDS
 
 from irsys.data import RESULTS_DIR, doc_text, load_scifact
-from irsys.metrics import RECALL_KS
 from irsys.preprocess import Analyzer
 
 # Validated categorical palette (dataviz reference, slots 1-7, light surface); color follows the system.
@@ -175,44 +174,24 @@ def _save(fig, path: Path) -> None:
 
 
 def plot_main_metrics(metrics: pd.DataFrame, path: Path) -> None:
-    """Small multiples: one panel per metric, one bar per system, value at the bar tip."""
-    panels = [("nDCG@10", "nDCG@10 (95% CI)"), ("MAP@100", "MAP@100"), ("R@100", "Recall@100")]
+    """Small multiples: the six metrics at k = 10, one bar per system, value at the bar tip, one 0-1 scale."""
+    panels = ["nDCG@10", "MAP", "MRR", "P@10", "R@10", "F1@10"]
     m = metrics.iloc[::-1]  # first system on top
     y = np.arange(len(m))
-    fig, axes = plt.subplots(1, 3, figsize=(12, 3.4), sharey=True)
-    for ax, (col, title) in zip(axes, panels):
+    fig, axes = plt.subplots(2, 3, figsize=(12, 6.6), sharey=True)
+    for ax, col in zip(axes.flat, panels):
         ax.barh(y, m[col], height=0.55, color=[COLORS[s] for s in m["system"]])
-        if col == "nDCG@10":
-            ax.errorbar(m[col], y, xerr=[m[col] - m["nDCG@10_ci_lo"], m["nDCG@10_ci_hi"] - m[col]],
-                        fmt="none", ecolor=INK_2, elinewidth=1, capsize=3)
-        label_x = m["nDCG@10_ci_hi"] if col == "nDCG@10" else m[col]  # clear of the error bar
-        for yi, v, lx in zip(y, m[col], label_x):
-            ax.text(lx + 0.015, yi, f"{v:.3f}", va="center", color=INK, fontsize=9)
+        for yi, v in zip(y, m[col]):
+            ax.text(v + 0.015, yi, f"{v:.3f}", va="center", color=INK, fontsize=9)
         ax.set_xlim(0, 1.05)
-        ax.set_title(title)
+        ax.set_title(col)
         ax.grid(axis="y", visible=False)
         ax.tick_params(axis="y", length=0)
-    axes[0].set_yticks(y, m["name"])
-    fig.suptitle("Retrieval effectiveness on SciFact test (300 queries)", x=0.01, ha="left",
+    for row in axes:
+        row[0].set_yticks(y, m["name"])
+    fig.suptitle("Retrieval effectiveness on SciFact test (300 claims), k = 10", x=0.01, ha="left",
                  color=INK, fontsize=12, fontweight="semibold")
     fig.tight_layout()
-    _save(fig, path)
-
-
-def plot_recall_at_k(metrics: pd.DataFrame, path: Path) -> None:
-    fig, ax = plt.subplots(figsize=(7.5, 4.2))
-    for _, row in metrics.iterrows():
-        values = [row[f"R@{k}"] for k in RECALL_KS]
-        ax.plot(RECALL_KS, values, color=COLORS[row["system"]], linewidth=2, marker="o", markersize=5,
-                markeredgecolor=SURFACE, markeredgewidth=1.5, solid_capstyle="round", label=row["name"])
-    ax.set_xscale("log")
-    ax.set_xticks(RECALL_KS, [str(k) for k in RECALL_KS])
-    ax.minorticks_off()
-    ax.set_ylim(0, 1.02)
-    ax.set_xlabel("Cut-off k (log scale)")
-    ax.set_ylabel("Recall@k")
-    ax.set_title("Recall@k: share of relevant abstracts found in the top k")
-    ax.legend(loc="center left", bbox_to_anchor=(1.02, 0.5))  # outside the plot: lines cross every corner
     _save(fig, path)
 
 
@@ -273,8 +252,8 @@ def analyze(results_dir: Path = RESULTS_DIR) -> None:
     fig_dir = results_dir / "figures"
 
     plot_main_metrics(metrics, fig_dir / "main_metrics.png")
-    plot_recall_at_k(metrics, fig_dir / "recall_at_k.png")
     plot_per_query_delta(per_query, names, fig_dir / "per_query_delta.png")
+    (fig_dir / "recall_at_k.png").unlink(missing_ok=True)  # retired figure (Recall@k is reported at k = 5, 10 only)
 
     # Vocabulary-mismatch analysis, using the same analyzer the selected TF-IDF system indexes with.
     cfg = config["tfidf"]
@@ -290,11 +269,8 @@ def analyze(results_dir: Path = RESULTS_DIR) -> None:
     plot_overlap_buckets(table, systems, names, fig_dir / "overlap_buckets.png")
     (results_dir / "overlap_buckets.md").write_text(
         "Mean nDCG@10 per lexical-overlap tercile. Overlap = share of a query's index terms "
-        f"(analyzer of the selected TF-IDF config: {cfg['label']}) that occur in its relevant abstract(s). "
-        f"Spearman ρ between overlap and per-query nDCG@10: "
-        + ", ".join(f"{names[s]} {overlap.corr(ndcg[s].reindex(overlap.index), method='spearman'):.2f}"
-                    for s in systems)
-        + ".\n\n" + table.rename(columns={**names, "range": "overlap range"}).to_markdown(index=False, floatfmt=".3f")
+        f"(analyzer of the selected TF-IDF config: {cfg['label']}) that occur in its relevant abstract(s).\n\n"
+        + table.rename(columns={**names, "range": "overlap range"}).to_markdown(index=False, floatfmt=".3f")
         + "\n",
         encoding="utf-8",
     )

@@ -458,18 +458,22 @@ CSS = """
 
 METRICS_GUIDE = """\
 **How to read this.** Every system searched for each of the 300 test claims, and we checked where it put the
-correct paper.
-- **Grade (nDCG@10)**, from 0 to 1: how high the correct paper appears in the first 10 results. 1 = always
-  first; 0.5 ≈ usually third; 0 = not in the top 10.
-- **Correct paper in top 100**: how often it is anywhere in the first 100 results. The rerankers cannot beat
-  TF-IDF here: they only reorder its top 100.
-- **Time per claim**: one search on this laptop.
-- **Better than TF-IDF?**: a statistical test on the same 300 claims (Wilcoxon, p < 0.05) says whether the
-  difference is real or just luck.
+correct paper. Each metric is between 0 and 1 (higher is better), averaged over the 300 claims; @5 and @10 mean
+"in the first 5 / 10 results".
+- **nDCG@k**: the main grade. How high the correct paper appears in the top k: 1 = always first, 0.5 ≈ usually
+  third, 0 = not in the top k.
+- **MAP** (mean average precision): how early *all* the correct papers appear in the ranking.
+- **MRR** (mean reciprocal rank): 1 ÷ the position of the first correct paper (position 2 → 0.5).
+- **Precision@k**: the share of the top k that is correct. Small for everyone (at most 0.2 at k = 5, 0.1 at
+  k = 10) because most claims have only one correct paper.
+- **Recall@k**: the share of the correct papers found in the top k.
+- **F1@k**: precision and recall combined into one number (their harmonic mean).
 
-Other standard metrics (MAP, MRR, precision, recall at every cut-off) are in REPORT.md.
+Below the metrics: how long one search takes, and whether a statistical test on the same 300 claims (Wilcoxon,
+p < 0.05) says the difference to TF-IDF is real or just luck.
 """
 FIGURE_CAPTIONS = {
+    "main_metrics": "The six metrics at k = 10, one panel each, on the same 0–1 scale.",
     "overlap_buckets": ("Claims split into three equal groups by how many of their words appear in the correct "
                         "paper. Every system does worse when fewer words are shared; word matching suffers most."),
     "per_query_delta": ("One thin bar per claim. Green: the AI embeddings did better; blue: TF-IDF did better; "
@@ -486,45 +490,40 @@ PLAIN_NAMES = {
 }
 
 
-def _markdown_rows(text: str) -> list[dict[str, str]]:
-    """Rows of the first pipe table in ``text`` (header row, alignment row, then data)."""
-    lines = [line.strip() for line in text.splitlines() if line.strip().startswith("|")]
-
-    def cells(line: str) -> list[str]:
-        return [c.strip() for c in line.strip("|").split("|")]
-
-    return [dict(zip(cells(lines[0]), cells(line))) for line in lines[2:]] if len(lines) > 2 else []
-
-
-def simple_results_table(results_dir=RESULTS_DIR) -> str:
-    """The four numbers that matter per system, from the files ``irsys evaluate`` wrote."""
+def results_tables(results_dir=RESULTS_DIR) -> str:
+    """The six metrics per system, then time per claim and the significance verdict vs. TF-IDF."""
+    from irsys.evaluate import read_markdown_table
+    from irsys.metrics import METRICS
     from irsys.stats import paired_tests
 
     metrics = pd.read_csv(results_dir / "metrics.csv")
-    latency = {row["System"]: float(row["Mean latency (ms)"])
-               for row in _markdown_rows((results_dir / "efficiency.md").read_text(encoding="utf-8"))}
+    latency = {row["System"]: float(row["Mean time per claim (ms)"])
+               for row in read_markdown_table((results_dir / "efficiency.md").read_text(encoding="utf-8"))}
     ndcg = pd.read_csv(results_dir / "per_query.csv", dtype={"qid": str}).pivot(
         index="qid", columns="system", values="nDCG@10")
     tests = paired_tests(ndcg["tfidf"], {s: ndcg[s] for s in ndcg if s != "tfidf"}).set_index("system")
 
-    rows = ["| System | Grade (nDCG@10) | Correct paper in top 100 | Time per claim | Better than TF-IDF? |",
-            "|---|---|---|---|---|"]
-    for key, name, grade, top100 in zip(metrics["system"], metrics["name"], metrics["nDCG@10"], metrics["R@100"]):
+    scores = ["| System | " + " | ".join(METRICS) + " |", "|---" * (len(METRICS) + 1) + "|"]
+    extras = ["| System | Time per claim | Really better than TF-IDF? |", "|---|---|---|"]
+    for row in metrics.to_dict("records"):
+        key, name = row["system"], row["name"]
+        label = PLAIN_NAMES.get(key, name)
+        scores.append(f"| {label} | " + " | ".join(f"{row[m]:.3f}" for m in METRICS) + " |")
         if key == "tfidf":
             verdict = "— (baseline)"
         elif tests.loc[key, "holm_p"] < 0.05:
             verdict = "yes" if tests.loc[key, "delta"] > 0 else "no, worse"
         else:
             verdict = "no real difference"
-        time = _duration(latency[name]) if name in latency else "—"
-        rows.append(f"| {PLAIN_NAMES.get(key, name)} | {grade:.3f} | {top100:.0%} | {time} | {verdict} |")
-    return "\n".join(rows) + "\n"
+        extras.append(f"| {label} | {_duration(latency[name]) if name in latency else '—'} | {verdict} |")
+    return ("**The six metrics** (k = 5 and 10)\n\n" + "\n".join(scores)
+            + "\n\n**Speed and significance** (significance tested on nDCG@10)\n\n" + "\n".join(extras) + "\n")
 
 
 def _metrics_markdown() -> str:
     if not (RESULTS_DIR / "metrics.csv").exists():
         return "Run `uv run irsys evaluate` to produce the results table."
-    return METRICS_GUIDE + "\n" + simple_results_table()
+    return METRICS_GUIDE + "\n" + results_tables()
 
 
 def build_app(engine: DemoEngine):

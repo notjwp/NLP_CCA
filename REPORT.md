@@ -131,13 +131,13 @@ after relevance fine-tuning separates what prompting alone achieves from what ta
   (§4.1). The models, the reranking depth (100), the LLM prompt (the model authors' SciFact instruction)
   and the RRF constant ($k=60$, the published default) are fixed in advance. The 300 test queries are
   used once, for the final comparison.
-- **Metrics** are implemented from scratch with trec_eval/BEIR definitions and unit-tested on
-  hand-computed cases. **nDCG@10** is the primary metric, as in BEIR. MAP@100, MRR@10, P@10, Recall@10
-  and Recall@100 are also reported. Every system returns the top 100 documents per query.
-- **Uncertainty and significance.** 95% confidence intervals use a 10,000-sample bootstrap over
-  queries. Each system is compared with TF-IDF on the *same* queries using the two-sided Wilcoxon
-  signed-rank test (plus a paired t-test as a cross-check), with a Holm correction over the 6
-  comparisons per metric.
+- **Metrics.** Six ranking metrics, implemented from scratch with trec_eval/BEIR definitions and
+  unit-tested on hand-computed cases: **nDCG@k**, **MAP**, **MRR**, **Precision@k**, **Recall@k** and
+  **F1@k** (the harmonic mean of P@k and R@k), at k = 5 and 10. **nDCG@10** is the primary metric, as in
+  BEIR. Every system returns the top 100 documents per query; MAP and MRR use that whole ranking.
+- **Significance.** Each system is compared with TF-IDF on nDCG@10 on the *same* queries using the
+  two-sided Wilcoxon signed-rank test, with a Holm correction over the 6 comparisons.
+- **Speed.** Index build time and the mean time to answer one query.
 - **Hardware:** NVIDIA RTX 3050 Laptop GPU (4 GB), PyTorch 2.14.1 (CUDA 13.0), Python 3.13.5.
   TF-IDF runs on the CPU.
 
@@ -145,19 +145,21 @@ after relevance fine-tuning separates what prompting alone achieves from what ta
 
 ### 4.1 Choosing the TF-IDF configuration (train split, 809 queries)
 
-From [`results/ablation_train.md`](results/ablation_train.md):
+From [`results/ablation_train.md`](results/ablation_train.md), which also has the k = 5 columns:
 
-| Configuration | nDCG@10 | MAP@100 | Recall@100 |
-|---|---:|---:|---:|
-| `ntc.ntc`, raw tokens (no stopword removal, no stemming) | 0.5957 | 0.5468 | 0.9077 |
-| `ltc.ltc` + stopwords | 0.6456 | 0.6029 | 0.9149 |
-| `ltc.ltc` + stopwords + stemming | 0.6688 | 0.6250 | 0.9279 |
-| `lnc.ltc` + stopwords + stemming | 0.6758 | 0.6343 | 0.9221 |
-| **`lsc.lsc` + stopwords + stemming (selected)** | **0.6789** | **0.6364** | 0.9309 |
-| `lsc.lsc` + stopwords + POS lemmatization | 0.6644 | 0.6206 | 0.9198 |
-| `lsc.lsc` + stopwords + stemming + noun phrases | 0.6595 | 0.6147 | **0.9371** |
-| `lsc.lsc` + stopwords + POS lemmatization + noun phrases | 0.6411 | 0.5978 | 0.9285 |
-| scikit-learn `TfidfVectorizer` reference (= `lsc.lsc`) | 0.6789 | 0.6364 | 0.9309 |
+| Configuration | nDCG@10 | MAP | MRR | P@10 | R@10 | F1@10 |
+|---|---:|---:|---:|---:|---:|---:|
+| `ntc.ntc`, raw tokens (no stopword removal, no stemming) | 0.5957 | 0.5468 | 0.5584 | 0.0842 | 0.7559 | 0.1497 |
+| `ltc.ltc` + stopwords | 0.6456 | 0.6029 | 0.6119 | 0.0875 | 0.7865 | 0.1557 |
+| `ltc.ltc` + stopwords + stemming | 0.6688 | 0.6250 | 0.6347 | 0.0897 | 0.8097 | 0.1598 |
+| `lnc.ltc` + stopwords + stemming | 0.6758 | 0.6343 | 0.6460 | 0.0896 | 0.8073 | 0.1595 |
+| **`lsc.lsc` + stopwords + stemming (selected)** | **0.6789** | **0.6364** | **0.6468** | **0.0904** | **0.8141** | **0.1608** |
+| `lsc.lsc` + stopwords + POS lemmatization | 0.6644 | 0.6206 | 0.6304 | 0.0896 | 0.8043 | 0.1594 |
+| `lsc.lsc` + stopwords + stemming + noun phrases | 0.6595 | 0.6147 | 0.6229 | 0.0897 | 0.8063 | 0.1596 |
+| `lsc.lsc` + stopwords + POS lemmatization + noun phrases | 0.6411 | 0.5978 | 0.6067 | 0.0875 | 0.7853 | 0.1556 |
+| scikit-learn `TfidfVectorizer` reference (= `lsc.lsc`) | 0.6789 | 0.6364 | 0.6468 | 0.0904 | 0.8141 | 0.1608 |
+
+The selected configuration is the best on all six metrics, at k = 10 and at k = 5.
 
 - **Sublinear tf + stopword removal** gives the largest gain (+0.050 nDCG@10 over raw counts). One
   repeated term can no longer dominate a document, and function words stop adding noise.
@@ -173,11 +175,10 @@ From [`results/ablation_train.md`](results/ablation_train.md):
   *positive*). On the training claims, stems match more of a claim's terms in its relevant abstract than
   lemmas do for **228** of the 809 claims, and fewer for only 27. That extra matching outweighs stemming's
   over-merging (*organ/organism/organization* → `organ`).
-- **Noun-phrase terms lower nDCG@10 (−0.019) but give the best Recall@100 (0.937).** Phrases are very
+- **Noun-phrase terms lower nDCG@10 (−0.019)**, and every other metric with it. Phrases are very
   specific: 36% of the claims' phrase terms occur in no abstract, and the rest are rare (median document
-  frequency 6). Their large idf lets one exact shared phrase dominate the score, which pulls in some
-  extra relevant abstracts lower down but often promotes the wrong abstract to the top. Combining both
-  options is the worst of the POS variants (0.641).
+  frequency 6). Their large idf lets one exact shared phrase dominate the score, which often promotes the
+  wrong abstract to the top. Combining both options is the worst of the POS variants (0.641).
 - The selection rule (best nDCG@10 on train) therefore keeps plain stemming. POS tagging and chunking stay
   in the system as analysis tools: the demo shows the tags and phrases for any claim.
 - The scikit-learn reference reproduces our `lsc.lsc` system exactly, which cross-checks the whole
@@ -185,26 +186,43 @@ From [`results/ablation_train.md`](results/ablation_train.md):
 
 ### 4.2 Main comparison (test split, 300 queries)
 
-From [`results/metrics.md`](results/metrics.md):
+From [`results/metrics.md`](results/metrics.md). At k = 10, with MAP and MRR over each system's top 100:
 
-| System | nDCG@10 | 95% CI | MAP@100 | MRR@10 | P@10 | R@10 | R@100 |
-|---|---:|:---:|---:|---:|---:|---:|---:|
-| **TF-IDF cosine** (`lsc.lsc`) | 0.659 | [0.617, 0.702] | 0.609 | 0.618 | 0.090 | 0.819 | 0.930 |
-| Dense: all-MiniLM-L6-v2 | 0.645 | [0.599, 0.690] | 0.603 | 0.605 | 0.088 | 0.783 | 0.925 |
-| Dense: bge-small-en-v1.5 | 0.713 | [0.669, 0.756] | 0.674 | 0.682 | 0.094 | 0.836 | 0.942 |
-| Hybrid: TF-IDF + bge (RRF) | 0.721 | [0.681, 0.761] | 0.674 | 0.682 | 0.098 | 0.872 | **0.968** |
-| TF-IDF → cross-encoder | 0.690 | [0.645, 0.734] | 0.652 | 0.661 | 0.091 | 0.811 | 0.930 |
-| TF-IDF → LLM zero-shot (Qwen3-0.6B) | 0.276 | [0.237, 0.317] | 0.239 | 0.229 | 0.049 | 0.443 | 0.930 |
-| **TF-IDF → LLM reranker (Qwen3-Reranker-0.6B)** | **0.772** | [0.731, 0.811] | **0.734** | **0.741** | **0.100** | **0.889** | 0.930 |
+| System | nDCG@10 | MAP | MRR | P@10 | R@10 | F1@10 |
+|---|---:|---:|---:|---:|---:|---:|
+| **TF-IDF cosine** (`lsc.lsc`) | 0.659 | 0.609 | 0.623 | 0.090 | 0.819 | 0.160 |
+| Dense: all-MiniLM-L6-v2 | 0.645 | 0.603 | 0.611 | 0.088 | 0.783 | 0.156 |
+| Dense: bge-small-en-v1.5 | 0.713 | 0.674 | 0.687 | 0.094 | 0.836 | 0.167 |
+| Hybrid: TF-IDF + bge (RRF) | 0.721 | 0.674 | 0.686 | 0.098 | 0.872 | 0.173 |
+| TF-IDF → cross-encoder | 0.690 | 0.652 | 0.666 | 0.091 | 0.811 | 0.161 |
+| TF-IDF → LLM zero-shot (Qwen3-0.6B) | 0.276 | 0.239 | 0.246 | 0.049 | 0.443 | 0.087 |
+| **TF-IDF → LLM reranker (Qwen3-Reranker-0.6B)** | **0.772** | **0.734** | **0.743** | **0.100** | **0.889** | **0.177** |
 
-(P@10 is small for every system because most queries have only one relevant abstract, which caps
-P@10 at 0.1.)
+At k = 5:
+
+| System | nDCG@5 | P@5 | R@5 | F1@5 |
+|---|---:|---:|---:|---:|
+| **TF-IDF cosine** (`lsc.lsc`) | 0.633 | 0.161 | 0.745 | 0.260 |
+| Dense: all-MiniLM-L6-v2 | 0.629 | 0.164 | 0.738 | 0.263 |
+| Dense: bge-small-en-v1.5 | 0.685 | 0.167 | 0.759 | 0.269 |
+| Hybrid: TF-IDF + bge (RRF) | 0.692 | 0.173 | 0.787 | 0.279 |
+| TF-IDF → cross-encoder | 0.668 | 0.165 | 0.748 | 0.265 |
+| TF-IDF → LLM zero-shot (Qwen3-0.6B) | 0.235 | 0.069 | 0.324 | 0.113 |
+| **TF-IDF → LLM reranker (Qwen3-Reranker-0.6B)** | **0.744** | **0.180** | **0.808** | **0.288** |
 
 ![Effectiveness on SciFact test](results/figures/main_metrics.png)
 
-The fine-tuned LLM reranker is the most effective system on every metric except Recall@100. It cannot
-change Recall@100: it only reorders TF-IDF's top 100. The *same* LLM used zero-shot is by far the worst
-system, at less than half of TF-IDF's nDCG@10 (§5.4 explains why).
+- **The fine-tuned LLM reranker is the best system on all six metrics, at both k = 5 and k = 10.** The
+  *same* LLM used zero-shot is by far the worst system, at less than half of TF-IDF's nDCG@10 (§5.4
+  explains why).
+- **The order of the systems is the same on almost every metric.** The one exception: general-purpose
+  MiniLM edges TF-IDF on P@5 and F1@5 (0.164 vs. 0.161), but is behind it on every other metric.
+- **Precision@k and F1@k are small for every system** because most queries have only one relevant
+  abstract, which caps P@5 at 0.2 and P@10 at 0.1. F1@k sits close to the smaller of the two, precision.
+  Going from k = 5 to k = 10, recall rises (TF-IDF 0.745 → 0.819, LLM reranker 0.808 → 0.889) while
+  precision halves.
+- **Beyond the top 10:** TF-IDF's top 100 contains none of the relevant abstracts for 20 of the 300
+  queries, the hybrid's for only 9. The hybrid rescues 11 of TF-IDF's 20 and loses none.
 
 The other results agree with published numbers.
 - The dense models reproduce the SciFact nDCG@10 that an independent BEIR evaluation reports for the
@@ -227,10 +245,6 @@ does better / the same / worse than TF-IDF.
 | TF-IDF → LLM zero-shot (Qwen3-0.6B) | −0.383 | 9/86/205 | 5.2 × 10⁻³³ | 3.1 × 10⁻³² | **yes (worse)** |
 | TF-IDF → LLM reranker (Qwen3-Reranker-0.6B) | +0.113 | 96/171/33 | 1.0 × 10⁻¹¹ | 5.1 × 10⁻¹¹ | **yes** |
 
-On **Recall@100**, only the hybrid is significantly better than TF-IDF (0.968 vs. 0.930, Holm p = 0.0038).
-It finds more relevant abstracts on 13 queries and **fewer on none** (13/287/0). The rerankers' Recall@100
-is identical to TF-IDF's by construction, because they only reorder TF-IDF's top 100.
-
 The LLM reranker's lead holds against the strongest other systems too. These are three further paired
 Wilcoxon tests, run after seeing the results and so outside the corrected family above; all three would
 survive a Holm correction:
@@ -241,27 +255,19 @@ survive a Holm correction:
 | Dense: bge-small-en-v1.5 | +0.059 | 69/197/34 | 2.5 × 10⁻⁵ |
 | TF-IDF → cross-encoder (same 100 candidates) | +0.083 | 78/189/33 | 1.5 × 10⁻⁷ |
 
-![Recall@k](results/figures/recall_at_k.png)
-
-The recall curves show where the neural signal helps: at the very top of the ranking. Recall@1 is 0.643
-for the LLM reranker, 0.576 for bge, 0.562 for the hybrid and 0.554 for the cross-encoder, against 0.487
-for TF-IDF and 0.482 for MiniLM. Further down, TF-IDF catches up. By k = 20 it has drawn level with bge
-(0.884 vs. 0.873) and is well ahead of MiniLM (0.837). The LLM reranker leads up to k = 10. From k = 20
-the hybrid leads (Recall@50 = 0.962), because the rerankers are capped at TF-IDF's Recall@100 of 0.930.
-
 ### 4.4 Efficiency
 
-From [`results/efficiency.md`](results/efficiency.md) (latency = one query at a time, top 100):
+From [`results/efficiency.md`](results/efficiency.md) (time per query = one query at a time, top 100):
 
-| System | Index build | Index size | Model size | Mean latency | Hardware |
-|---|---:|---:|---:|---:|:---:|
-| TF-IDF cosine | 1.0 s | 5.1 MB | — | **0.17 ms** | CPU |
-| Dense: all-MiniLM-L6-v2 | 13.0 s | 7.6 MB | 22.7M params | 7.9 ms | GPU |
-| Dense: bge-small-en-v1.5 | 47.3 s | 7.6 MB | 33.4M params | 12.5 ms | GPU |
-| Hybrid: TF-IDF + bge | 48.3 s | 12.7 MB | 33.4M params | 14.5 ms | GPU |
-| TF-IDF → cross-encoder | 1.0 s | 5.1 MB | 22.7M params | 484 ms | GPU |
-| TF-IDF → LLM zero-shot | 1.0 s | 5.1 MB | 596M params | 5,729 ms | GPU |
-| TF-IDF → LLM reranker | 1.0 s | 5.1 MB | 596M params | 5,789 ms | GPU |
+| System | Index build | Time per query | Hardware |
+|---|---:|---:|:---:|
+| TF-IDF cosine | 1.0 s | **0.17 ms** | CPU |
+| Dense: all-MiniLM-L6-v2 | 13.0 s | 7.9 ms | GPU |
+| Dense: bge-small-en-v1.5 | 47.3 s | 12.5 ms | GPU |
+| Hybrid: TF-IDF + bge | 48.3 s | 14.5 ms | GPU |
+| TF-IDF → cross-encoder | 1.0 s | 484 ms | GPU |
+| TF-IDF → LLM zero-shot | 1.0 s | 5,729 ms | GPU |
+| TF-IDF → LLM reranker | 1.0 s | 5,789 ms | GPU |
 
 TF-IDF answers a query about **70× faster than bge-small, ~2,800× faster than cross-encoder reranking
 and ~34,000× faster than LLM reranking**. It needs no GPU, no model download and about a second to index.
@@ -279,7 +285,8 @@ The average hides a lot of disagreement between the systems. bge-small beats TF-
 **TF-IDF beats bge-small on 51**, and 164 are tied. 154 of those ties are queries where both systems are
 perfect (129) or both score zero (25). The two methods fail on largely *different* queries: TF-IDF scores
 zero on 48 queries and bge on 46, but only 25 of these are shared. That complementarity is why fusing
-them works. The hybrid scores zero on only 34 queries, and never loses recall. The LLM reranker scores
+them works. The hybrid scores zero on only 34 queries, and its top 100 never loses a relevant abstract
+that TF-IDF's top 100 contained. The LLM reranker scores
 zero on 31. It rescues 24 of TF-IDF's 48 failures and loses only 7 queries that TF-IDF had found.
 
 ### 5.2 Vocabulary mismatch
@@ -302,9 +309,9 @@ groups (from [`results/overlap_buckets.md`](results/overlap_buckets.md)):
 
 - **Every** system degrades as overlap falls. Even the neural models do much better when the
   vocabularies agree, and all of them find the low-overlap third hard.
-- TF-IDF depends on overlap the most: Spearman ρ between overlap and per-query nDCG@10 is 0.60 for TF-IDF
-  (0.61 for the cross-encoder, which inherits TF-IDF's candidates), against 0.54 for bge, 0.52 for the LLM
-  reranker and 0.48 for MiniLM.
+- TF-IDF depends on overlap the most: its nDCG@10 climbs by 0.52 from the low to the high tercile, against
+  0.48 for bge, 0.46 for MiniLM and 0.42 for the LLM reranker. Only the cross-encoder, which inherits
+  TF-IDF's candidates, climbs more (0.56).
 - bge's advantage over TF-IDF is largest when overlap is low or medium (+0.069, +0.066) and shrinks to
   +0.026 when overlap is high. With high overlap, TF-IDF (0.888) clearly beats the general-purpose MiniLM
   (0.831).
@@ -399,7 +406,7 @@ TF-IDF never retrieved, which no reranker can fix, or one the reranker saw but r
 
 Two thirds of the LLM reranker's failures (20 of 31) are first-stage misses. It almost never misjudges an
 abstract it is shown. The obvious next step is a stronger first stage, such as the hybrid, whose top 100
-holds 96.8% of the relevant abstracts against TF-IDF's 93.0%.
+misses the relevant abstract on only 9 queries against TF-IDF's 20.
 
 **Why the zero-shot LLM fails.** The share of TF-IDF candidates each LLM answered "yes" to (P(yes) > 0.5),
 out of 29,889 judged (claim, abstract) pairs, where roughly 1 candidate in 100 is relevant:
@@ -439,9 +446,9 @@ contrast at a larger scale: what makes a model good at retrieval is training on 
 not its size or architecture.
 
 **Best of both worlds.** The approaches fail on different queries (§5.1), so combining them beats each
-alone. The two combinations in the study do different jobs. The hybrid is the best *first stage*: it
-never loses a relevant document TF-IDF had found and has the highest Recall@100 (0.968), with no weights
-to tune. The LLM reranker is the best *final ranking*, but two thirds of its failures are relevant
+alone. The two combinations in the study do different jobs. The hybrid is the best *first stage*: its
+top 100 misses the relevant abstract on only 9 queries (TF-IDF: 20) and never loses one TF-IDF had
+found, with no weights to tune. The LLM reranker is the best *final ranking*, but two thirds of its failures are relevant
 abstracts TF-IDF never retrieved. A hybrid first stage with an LLM reranker on top is therefore the
 natural next design. It is the standard architecture of modern search systems: cheap retrieval of
 candidates, then an expensive model on a short list.
@@ -468,8 +475,8 @@ Their scores are opaque. The LLM's yes-probability reads like an explanation, bu
   cross-encoder and the LLMs 512 tokens per prompt, so the ends of long abstracts are ignored. TF-IDF sees
   the whole text.
 - **Sparse judgments.** Most queries have one relevant abstract, so a single rank change moves a query's
-  score a lot, and unjudged-but-relevant documents count as misses. The bootstrap intervals (±0.04)
-  reflect this.
+  score a lot, and unjudged-but-relevant documents count as misses. It is also why Precision@k and F1@k are
+  low for every system.
 - **Tie-splitting.** The overlap terciles break ties in query order to keep the groups equal in size, so
   0.75 appears in two buckets.
 - **Model scale.** Only models up to 0.6B parameters fit the 4 GB laptop GPU. Larger LLMs, or API models,
@@ -477,7 +484,8 @@ Their scores are opaque. The LLM's yes-probability reads like an explanation, bu
   much greater computational cost.
 - **One prompt.** The LLMs use the instruction their authors use for SciFact. It was fixed in advance and
   not tuned (tuning it on the test claims would not be fair); other prompts could help the zero-shot model.
-- **Reranking depth.** All rerankers see only TF-IDF's top 100, so their Recall@100 is capped at 0.930.
+- **Reranking depth.** All rerankers see only TF-IDF's top 100, so they can never find a relevant abstract
+  TF-IDF missed (20 of the 300 queries).
 - **Efficiency numbers** come from one laptop and include Python overhead; they are only meant as
   relative comparisons.
 
@@ -491,8 +499,9 @@ it copes with vocabulary mismatch. TF-IDF still wins on queries that hinge on ra
 fails when a claim shares a rare term with its answer. The general-purpose MiniLM model does not beat it
 at all. An LLM fine-tuned for relevance, reranking TF-IDF's candidates, is the most effective system
 (0.772), while the same LLM used zero-shot is the least (0.276): task training, not model type, decides
-the outcome. The best results come from **combining** classical and neural methods. The hybrid gives the
-best recall (0.968 Recall@100), and TF-IDF retrieval followed by LLM reranking gives the best ranking.
+the outcome: it is the best system on all six metrics (nDCG@k, MAP, MRR, Precision@k, Recall@k, F1@k)
+at both k = 5 and 10. The best results come from **combining** classical and neural methods. The hybrid
+is the best first stage, and TF-IDF retrieval followed by LLM reranking gives the best ranking.
 The classical method remains thousands of times cheaper.
 
 ## 9. Reproducing the results
@@ -501,6 +510,7 @@ The classical method remains thousands of times cheaper.
 uv sync
 uv run pytest                 # 127 tests (12 marked slow: data download + real models)
 uv run irsys evaluate         # → results/*.md, *.csv, runs/*.trec, config.json  (~1 h on an RTX 3050)
+uv run irsys rescore          # recompute the metric files from the saved runs (no models)
 uv run irsys analyze          # → results/figures/*.png, overlap_buckets.md, error_analysis.md, examples.md
 uv run irsys search "your claim here" -k 5
 uv run irsys demo             # interactive demo (DEMO.md)

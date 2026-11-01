@@ -12,6 +12,7 @@ def test_search_defaults_to_five_results():
 
 def test_parses_pipeline_commands():
     assert build_parser().parse_args(["evaluate"]).command == "evaluate"
+    assert build_parser().parse_args(["rescore"]).command == "rescore"
     assert build_parser().parse_args(["analyze"]).command == "analyze"
 
 
