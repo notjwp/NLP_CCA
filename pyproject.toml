@@ -21,6 +21,7 @@ dependencies = [
     "tabulate>=0.10.0",
     "torch>=2.9",
     "tqdm>=4.70.1",
+    "transformers>=5",
 ]
 
 [project.scripts]

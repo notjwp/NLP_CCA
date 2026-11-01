@@ -212,7 +212,7 @@ def plot_recall_at_k(metrics: pd.DataFrame, path: Path) -> None:
     ax.set_xlabel("Cut-off k (log scale)")
     ax.set_ylabel("Recall@k")
     ax.set_title("Recall@k: share of relevant abstracts found in the top k")
-    ax.legend(loc="lower right")
+    ax.legend(loc="center left", bbox_to_anchor=(1.02, 0.5))  # outside the plot: lines cross every corner
     _save(fig, path)
 
 
@@ -255,7 +255,7 @@ def plot_overlap_buckets(table: pd.DataFrame, systems: list[str], names: dict[st
     ax.set_ylabel("Mean nDCG@10")
     ax.set_title("Effectiveness by query–document vocabulary overlap")
     ax.grid(axis="x", visible=False)
-    ax.legend(loc="upper left", ncols=2, fontsize=9)
+    ax.legend(loc="upper center", bbox_to_anchor=(0.5, -0.2), ncols=3, fontsize=9)  # below: bars reach the top
     _save(fig, path)
 
 
@@ -328,8 +328,10 @@ def _write_error_analysis(results_dir, queries, qrels, corpus, texts, analyzer, 
         "Cells: failures (share of the category's claims).\n\n",
         table.rename(columns=names).to_markdown(index=False) + "\n",
     ]
+    # Examples: per category, the claims where TF-IDF and bge disagree most about the relevant abstract's rank.
+    spread = (ranks["tfidf"].fillna(101) - ranks["dense-bge"].fillna(101)).abs()
     for cat in CATEGORIES:
-        qids = sorted(category.index[category == cat], key=int)[:2]
+        qids = sorted(category.index[category == cat], key=lambda q: (-spread[q], int(q)))[:2]
         if qids:
             parts.append(f"\n**{cat}**, e.g.\n")
             for qid in qids:

@@ -119,6 +119,15 @@ def test_rendered_results_explain_each_system_in_plain_words(engine):
     assert "Matches the words." in html and "Matches the meaning." in html
 
 
+def test_slow_answers_are_shown_in_seconds():
+    from irsys.demo import SystemResult
+
+    fast = SystemResult("Fast", [], False, None, 27.43)
+    slow = SystemResult("Slow", [], False, None, 6898.6)
+    html = render_results([fast, slow], ANALYZER, "q")
+    assert "answered in 27.4 ms" in html and "answered in 6.9 s" in html
+
+
 def test_rendered_results_say_when_the_correct_paper_is_missing(engine):
     class _Nothing(Retriever):
         def search(self, query, k=10):

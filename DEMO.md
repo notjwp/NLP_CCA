@@ -1,111 +1,135 @@
 # Presentation demo: script and checklist
 
-The demo is an interactive app that runs locally in your browser. It sends the same query to three systems:
-**TF-IDF cosine**, **semantic search (bge-small)** and a **hybrid** of the two. It also shows, step by
-step, how TF-IDF computed its score.
+The demo is a small website that runs on this laptop. One scientific claim goes to four search engines at
+once, and the page shows which one finds the correct paper:
+
+| Column | What it is |
+|---|---|
+| **Word matching · TF-IDF** | The classical system, built from scratch: TF-IDF weights + cosine similarity |
+| **Meaning matching · AI embeddings** | bge-small, a transformer that turns each text into a "meaning vector" |
+| **Combined · words + meaning** | The two lists above merged (Reciprocal Rank Fusion) |
+| **LLM reranker · Qwen3** | A large language model reads the claim with each of TF-IDF's top 100 papers and answers yes/no |
 
 ```sh
 uv run irsys demo
 ```
 
-It loads in about 20–30 s, then opens your default browser at **http://127.0.0.1:7860**. If you'd rather
-present from Brave, paste that address into Brave. Stop the demo with `Ctrl+C` in the terminal.
+It loads in about 30–40 s, then opens your default browser at **http://127.0.0.1:7860**. To present
+from Brave, paste that address into Brave. Stop the demo with `Ctrl+C` in the terminal. Without a GPU, use
+`uv run irsys demo --no-llm` (three columns, no tab 3).
+
+**How the page behaves:** the first three columns appear instantly. The LLM column says *"The LLM is reading
+the 100 candidate papers…"* and fills in about 5 seconds later. That wait is part of the story: the LLM is
+the most accurate system and by far the slowest.
 
 ---
 
 ## Pre-flight checklist
 
 **The day before**
-- [ ] Run `uv run irsys demo` once and click through every preset. All models are already downloaded on
-      this laptop, and the demo runs **fully offline**: no Wi-Fi needed.
+- [ ] Run `uv run irsys demo` and click all four examples. Everything is downloaded already and the demo
+      runs **fully offline**: no Wi-Fi needed.
 - [ ] Copy `demo_screenshots/` into your slides as a backup (see "If something goes wrong").
 
 **10 minutes before**
+- [ ] Close the game (AURA 2) and other GPU-heavy apps; they take the GPU memory the LLM needs.
 - [ ] Plug in the charger. On battery, the GPU may throttle.
-- [ ] Close games and other GPU-heavy apps.
-- [ ] Run `uv run irsys demo`. Wait for the page to show results for the Bcl2 example.
-- [ ] Zoom the browser to **125–150 %** (`Ctrl` + `+`) so the back row can read it.
-- [ ] Leave it on **Tab 1** with the Bcl2 example loaded.
+- [ ] Run `uv run irsys demo`. Wait until example ① shows all four columns.
+- [ ] Zoom the browser to **125–150 %** (`Ctrl` + `+`) so the back row can read it. The four columns stay
+      side by side; if the screen is narrow they wrap onto a second row, which also works.
+- [ ] Leave it on **tab 1** with example ① loaded.
 
 ---
 
-## Script (about 7 minutes)
+## Script (about 8 minutes)
 
 ### 0 · Set the scene (30 s)
-> "This is a search engine over 5,183 real scientific abstracts from the SciFact benchmark. One query goes
-> to three systems at once. On the left, the **classical** system I built from scratch: TF-IDF weighting
-> plus cosine similarity. In the middle, a **semantic** system using a transformer language model that turns
-> text into meaning vectors. On the right, a **hybrid** that merges both rankings. Yellow highlights are
-> words that literally match the query."
+> "This is a search engine over 5,183 real scientific papers from the SciFact benchmark. I type a claim, and
+> four search engines look for the paper that supports or refutes it. On the left, the **classical** system
+> I built from scratch: it matches **words**, and rare words count more. Next, an AI model that matches
+> **meaning**. Then the two combined. On the right, a **large language model** that reads each candidate
+> paper and answers yes or no. For these example claims we know the correct paper, so the page marks it
+> with a green ✓."
 
-### 1 · Preset **"Bcl2 vs “BCL-2” · semantic wins"** (already loaded) (1.5 min)
+### 1 · Example ① "Bcl2 vs BCL-2 (spelling)" (already loaded) (2 min)
+**Tab 1 · Compare**
+- Word matching: **▼ correct paper only at position 32**. Meaning matching: **✓ position 1**. Combined:
+  **position 7**. Then the LLM column fills in: **✓ position 1**.
+> "The claim writes 'Bcl2'. The correct paper writes 'BCL-2', with a hyphen. To word matching those are
+> different words. The AI models know they are the same gene."
+
+**Tab 2 · Inside TF-IDF**
+- **1a–1e:** the claim is split into words; each word gets its **part of speech** (noun, verb, adjective);
+  the parser groups **noun phrases**; filler words like *of, is, the* are crossed out; words are cut to
+  their roots (*silencing* → `silenc`, *tumors* → `tumor`).
+- **Step 2:** `bcl2` appears in only **7** of 5,183 papers, so it gets the **highest rarity score (idf 7.6)**
+  and dominates the claim.
+- **Step 3:** TF-IDF's #1 result wins on `bcl2` **alone**. For the correct paper, `bcl2` shows *"not in this
+  paper"*, because there it is written "BCL-2", which became `bcl` + `2`.
+> "This is the vocabulary mismatch problem: exact matching fails when the same thing is written differently."
+
+**Tab 3 · Inside the LLM**
+- Point at the table: the LLM gives the correct paper a **~98%** probability of "yes". TF-IDF's #1 paper,
+  which is also about Bcl2 but doesn't address the claim, gets only **~56%**, so the correct one moves to
+  the top.
+- Point at the prompt: "This is exactly what the model reads: an instruction, the claim, one paper, and it
+  may only say yes or no. We read the probability of 'yes'. It does that 100 times per search."
+
+### 2 · Example ③ "Rare disease name" (1 min)
 **Tab 1**
-- Semantic: **✓ correct abstract at rank 1**. TF-IDF: **▼ only at rank 32**.
-> "The claim says 'Bcl2'. The correct paper writes 'BCL-2', with a hyphen. To TF-IDF those are different
-> words, so it can't connect them. The language model knows they're the same gene."
-
-**Tab 2 · How TF-IDF scored it**
-- Step 1: walk through tokens → stopwords crossed out → stems ("silencing" → `silenc`).
-- Step 2: `bcl2` appears in only **7** abstracts, so it gets the **highest idf (7.6)** and dominates the query.
-- Step 3: TF-IDF's #1 result wins on `bcl2` **alone**. The correct abstract shows "not in abstract" for
-  `bcl2`, because "BCL-2" was split into `bcl` + `2`.
-> "This is the vocabulary mismatch problem. Exact matching fails when the same idea is spelled differently."
-
-### 2 · Preset **"Rare term · TF-IDF wins"** (1 min)
-**Tab 1**
-- TF-IDF: **✓ rank 1**. Semantic: **▼ only at rank 59**.
+- Word matching: **✓ position 1**. Meaning matching: **▼ only at position 59**. Combined: **position 3**.
+  LLM: **✓ position 1**.
 
 **Tab 2**
-- Step 1: "ivermectin" is **crossed out**: it appears in no abstract at all.
-- Step 2: `onchocerciasi` appears in exactly **1** abstract out of 5,183, so its **idf is 9.55**, the
-  maximum possible. Its query weight is 0.92 (the maximum is 1).
-- Step 3: that single rare term is the whole score.
-> "Here exact matching wins. A rare technical term is a precise fingerprint. The language model only has a
-> vague idea of this disease name, so it drifts to generic drug-therapy papers."
+- **1e:** *ivermectin* is faded: it appears in **no** paper at all.
+- **Step 2:** `onchocerciasi` appears in exactly **1** paper out of 5,183, so its **idf is 9.55**, the maximum.
+- **Step 3:** that one rare word is the whole score.
+> "Here word matching wins. A rare technical term is a precise fingerprint. The embedding model only has a
+> vague idea of this disease and drifts to general drug-treatment papers. The LLM reads the actual paper,
+> so it gets it right too."
 
-### 3 · Live query (1 min)
+### 3 · Live claim (1 min)
 Type in the box and press Enter:
 
 **`heart attack risk in people with diabetes`**
 
-- Semantic #1: *"…unstable angina and non-Q-wave **myocardial infarction**…"*. That's the medical term for a
-  heart attack, even though the words "heart attack" never appear.
-- TF-IDF's top hit is a questionnaire paper that repeats the words heart, risk, people and diabetes. Its
-  next hits are about Alzheimer's risk factors and cholesterol.
-> "No hand-written synonyms anywhere: the model learned that 'heart attack' means 'myocardial infarction'."
+- Meaning matching finds *"…unstable angina and non-Q-wave **myocardial infarction**…"*: that is the medical
+  term for a heart attack, although the words "heart attack" never appear.
+- Word matching's top hit is a questionnaire paper that repeats *heart, risk, people, diabetes*.
+> "Nobody wrote a synonym list: the model learned that 'heart attack' means 'myocardial infarction'."
 
-**Audience suggestion?** Ask for a short **biomedical** claim; the corpus is all medical/biology abstracts.
-These also work well:
-- `cancer cells hide from the immune system`. Tab 2 shows "hide" is unknown to TF-IDF.
-- `children who are overweight`. Semantic also finds "obesity in children".
+**Audience suggestion?** Ask for a short **biomedical** claim; all the papers are medicine/biology. These
+also work well: `cancer cells hide from the immune system` (tab 2 shows *hide* is in no paper),
+`children who are overweight` (meaning matching also finds "obesity in children"). Typed claims get no ✓:
+only the 300 benchmark claims have known answers (the 🎲 button picks one).
 
-If the audience suggests a question, there's no ✓ marking. Only the 300 benchmark claims have known answers
-(the 🎲 **Random test claim** button picks one of them).
+### 4 · Results on all 300 test claims (1.5 min)
+**Tab 4** has a plain-language guide above the table. The grade is **nDCG@10**: 1 = the correct paper is
+always first, 0.5 ≈ usually third, 0 = not in the top 10.
 
-### 4 · Hybrid + the numbers (1.5 min)
-- Point at the **hybrid** column: in the Bcl2 example it lifts the correct paper from rank 32 to **rank 7**;
-  for the rare term it keeps it at **rank 3** even though semantic search alone ranked it 59th.
-- **Tab 3 · Evaluation results** shows the averages over all 300 test claims:
-
-| | nDCG@10 | Latency per query |
+| | nDCG@10 | Time per claim |
 |---|---|---|
-| TF-IDF (from scratch) | 0.659 | **0.26 ms** on CPU |
-| Semantic (bge-small) | 0.713, significantly better | 19 ms on GPU |
-| **Hybrid** | **0.722, best** | 21 ms |
+| Word matching · TF-IDF (from scratch) | 0.659 | **0.17 ms** on the CPU |
+| Meaning matching · bge-small | 0.713 | 12 ms on the GPU |
+| Combined (hybrid) | 0.722 | 14 ms |
+| LLM zero-shot (general Qwen3, just prompted) | 0.276 | 5.7 s |
+| **LLM reranker (Qwen3 trained for this)** | **0.772** | 5.8 s |
 
-> "Semantic search is about 8 % better on average, but TF-IDF is about 70× faster, needs no GPU and can
-> explain every score, as Tab 2 just did. They fail on *different* queries, so combining them gives the
-> best result."
+> "The LLM reranker is the best: 17% better than my TF-IDF, and significantly better than every other
+> system. But TF-IDF is about 34,000 times faster, needs no GPU, and every score can be explained word by
+> word, as tab 2 showed. And the same small LLM, only *prompted*, does far worse than TF-IDF: it says 'yes'
+> to every single paper. Training on the task matters more than the model being an LLM."
 
 ### 5 · Close (30 s)
-> "Classical and semantic retrieval are complementary: exact terms vs. meaning. That's why many modern
-> search engines use hybrids."
+> "Classical and AI retrieval are complementary: exact words versus meaning. The best results come from
+> using them together, a fast classical first stage and an AI model on top, which is how modern search
+> engines are built."
 
-The other two presets, if there's time:
-- **Paraphrase · semantic wins:** TF-IDF rank 11 → semantic rank 1. The claim and the abstract express the
-  same idea in different words.
-- **Exact terms · TF-IDF wins:** TF-IDF rank 1 → semantic rank 10. "LDL" vs "HDL" cholesterol: the
-  embedding blurs a one-letter difference that exact matching keeps.
+The other two examples, if there's time:
+- **② Same idea, other words:** word matching position 11 → meaning matching 1 → LLM 1. The claim and the
+  paper say the same thing in different words.
+- **④ LDL vs HDL:** word matching 1 → meaning matching 10 → LLM 1. The embedding blurs the one-letter
+  difference between LDL and HDL cholesterol; exact matching and the LLM keep it.
 
 ---
 
@@ -113,13 +137,17 @@ The other two presets, if there's time:
 
 | Question | Answer |
 |---|---|
-| Why are the hybrid's scores so small (≈0.03)? | Hybrid uses Reciprocal Rank Fusion, score = Σ 1/(60 + rank). It combines **ranks**, not scores, so cosine values and model scores never need to be on the same scale. |
-| What does "lsc.lsc" mean? | SMART notation: **l**og tf (1 + ln tf), **s**klearn-style idf (ln(N/df) + 1), **c**osine normalization, for both documents and query. It was chosen on the *training* queries, not the test set. |
+| What is POS tagging / parsing here? | Tab 2, rows 1b and 1c: NLTK's tagger labels each word noun/verb/adjective…, and a chunk parser with the grammar `NP: {<JJ.*\|NN.*>*<NN.*>}` groups noun phrases. We tested using them for lemmatization and phrase terms; on the 809 training claims plain stemming worked best (0.679 vs 0.664 / 0.660), so the final system uses stemming. |
+| Why does stemming beat lemmatization? | Stemming merges more word forms (*discontinue / discontinuation*, *activate / activation*). On 228 of 809 training claims it matches more of the claim's words in the correct paper; lemmatization does so on only 27. |
+| What does "lsc.lsc" mean? | SMART notation: **l**og tf (1 + ln tf), **s**klearn-style idf (ln(N/df) + 1), **c**osine normalization, for both papers and claim. Chosen on the *training* claims, not the test set. |
 | Is TF-IDF really from scratch? | Yes: own tokenizer, inverted index, weighting and cosine. A test checks it matches scikit-learn's TfidfVectorizer to 9 decimal places. |
-| Is the semantic model an LLM? | It's a small transformer language model (33M parameters, BERT family) trained for retrieval. It produces embeddings instead of generating text. |
-| Why is the improvement "significant"? | Wilcoxon signed-rank test over the same 300 queries, Holm-corrected: p = 0.008 for bge, p ≈ 10⁻⁷ for hybrid. |
-| Does it need a GPU? | Only the semantic side benefits. On CPU it still works, just slower. TF-IDF runs in a fraction of a millisecond on CPU. |
-| Why not use the cross-encoder in the demo? | It's in the report (0.690). At ~0.5 s per query it's the slowest system, and the three columns tell the story more clearly. |
+| How does the LLM give a score if it only says yes or no? | We never let it write. One forward pass gives the probability of every possible next word; we take P("yes") vs P("no"). Tab 3 shows the exact prompt. |
+| Why is the zero-shot LLM so bad? | It answers "yes" to 100% of the 29,889 candidate papers, so its ranking is close to random. The same model fine-tuned for relevance says "yes" to only 2.3% of candidates but to 75% of the correct ones. A 0.6B model can't follow "answer yes or no" discriminatively from the prompt alone; training on the task fixes that. |
+| Why does the LLM still miss some? | It fails on 31 claims; on 20 of them TF-IDF never put the correct paper in its top 100, so the LLM never saw it. A better first stage (the hybrid) would fix many of these. |
+| Why not a bigger LLM? | The laptop GPU has 4 GB. A 0.6B model already takes ~5 s per claim to read 100 papers; a 7B model would not fit, and an API model would cost money per query. |
+| Why are the hybrid's scores so small (≈0.03)? | Reciprocal Rank Fusion: score = Σ 1/(60 + rank). It combines **positions**, not scores, so the systems' different score scales never need matching. |
+| Is the improvement significant? | Wilcoxon signed-rank test on the same 300 claims, Holm-corrected for 6 comparisons: LLM reranker p ≈ 5×10⁻¹¹, hybrid p ≈ 10⁻⁷, bge p = 0.008. The cross-encoder (p = 0.09) and MiniLM are not significant. The LLM reranker also beats the hybrid significantly (p ≈ 2×10⁻⁵). |
+| Does it need a GPU? | Only the AI side. TF-IDF runs in a fraction of a millisecond on the CPU. `irsys demo --no-llm` runs without the LLM. |
 
 ---
 
@@ -128,13 +156,14 @@ The other two presets, if there's time:
   browser.
 - **"Address already in use":** an old demo is still running. Close that terminal, or run
   `uv run python -c "from irsys.demo import launch_demo; launch_demo(server_port=7870)"`.
-- **The laptop fails entirely:** use the backup screenshots in `demo_screenshots/`. They're in script order:
+- **"CUDA out of memory":** something else is using the GPU (close the game), or start with
+  `uv run irsys demo --no-llm`.
+- **The laptop fails entirely:** use the backup screenshots in `demo_screenshots/`, in script order:
 
 | File | Shows |
 |---|---|
-| `01_bcl2_compare.png`, `02_bcl2_explain.png` | Step 1 |
-| `03_paraphrase_compare.png` | Paraphrase preset |
-| `04_rare_term_compare.png`, `05_rare_term_explain.png` | Step 2 |
-| `06_exact_terms_compare.png` | Exact-terms preset |
-| `07_live_heart_attack_compare.png` | Step 3 |
-| `08_evaluation_results.png` | Step 4 |
+| `01_bcl2_compare.png`, `02_bcl2_inside_tfidf.png`, `03_bcl2_inside_llm.png` | Step 1 |
+| `04_rare_term_compare.png`, `05_rare_term_inside_tfidf.png` | Step 2 |
+| `06_live_heart_attack_compare.png` | Step 3 |
+| `07_results.png` | Step 4 |
+| `08_paraphrase_compare.png`, `09_ldl_hdl_compare.png` | Extra examples |

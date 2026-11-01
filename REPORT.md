@@ -39,7 +39,7 @@ that answer them (for example, a claim about "silencing of Bcl2" is answered by 
 kept, since claims often quote figures) → remove English stopwords → Porter stemming.
 
 Two classical NLP options build on **part-of-speech (POS) tagging**. NLTK's averaged-perceptron tagger
-labels every token with a Penn Treebank tag (Marcus et al., 1993), with stopwords still in place so the
+(Bird et al., 2009) labels every token with a Penn Treebank tag (Marcus et al., 1993), with stopwords still in place so the
 tagger sees the full context:
 
 - **POS-based lemmatization** replaces stemming. Each word becomes its WordNet dictionary form for its
@@ -192,15 +192,21 @@ From [`results/metrics.md`](results/metrics.md):
 | **TF-IDF cosine** (`lsc.lsc`) | 0.659 | [0.617, 0.702] | 0.609 | 0.618 | 0.090 | 0.819 | 0.930 |
 | Dense: all-MiniLM-L6-v2 | 0.645 | [0.599, 0.690] | 0.603 | 0.605 | 0.088 | 0.783 | 0.925 |
 | Dense: bge-small-en-v1.5 | 0.713 | [0.669, 0.756] | 0.674 | 0.682 | 0.094 | 0.836 | 0.942 |
-| **Hybrid: TF-IDF + bge (RRF)** | **0.722** | [0.681, 0.761] | **0.674** | 0.682 | **0.098** | **0.872** | **0.968** |
+| Hybrid: TF-IDF + bge (RRF) | 0.722 | [0.681, 0.761] | 0.674 | 0.682 | 0.098 | 0.872 | **0.968** |
 | TF-IDF → cross-encoder | 0.690 | [0.645, 0.734] | 0.652 | 0.661 | 0.091 | 0.811 | 0.930 |
+| TF-IDF → LLM zero-shot (Qwen3-0.6B) | 0.276 | [0.237, 0.317] | 0.239 | 0.229 | 0.049 | 0.443 | 0.930 |
+| **TF-IDF → LLM reranker (Qwen3-Reranker-0.6B)** | **0.772** | [0.731, 0.811] | **0.734** | **0.741** | **0.100** | **0.889** | 0.930 |
 
 (P@10 is small for every system because most queries have only one relevant abstract, which caps
 P@10 at 0.1.)
 
 ![Effectiveness on SciFact test](results/figures/main_metrics.png)
 
-These results agree with published numbers.
+The fine-tuned LLM reranker is the most effective system on every metric except Recall@100. It cannot
+change Recall@100: it only reorders TF-IDF's top 100. The *same* LLM used zero-shot is by far the worst
+system, at less than half of TF-IDF's nDCG@10 (§5.4 explains why).
+
+The other results agree with published numbers.
 - The dense models reproduce the SciFact nDCG@10 that an independent BEIR evaluation reports for the
   same checkpoints: 0.713 for bge-small-en-v1.5 and 0.645 for all-MiniLM-L6-v2 (mxbai-edge-colbert-v0
   tech report, Table 16).
@@ -218,17 +224,30 @@ does better / the same / worse than TF-IDF.
 | Dense: bge-small-en-v1.5 | +0.054 | 85/164/51 | 0.0027 | 0.0082 | **yes** |
 | Hybrid: TF-IDF + bge (RRF) | +0.063 | 83/184/33 | 3.7 × 10⁻⁸ | 1.5 × 10⁻⁷ | **yes** |
 | TF-IDF → cross-encoder | +0.031 | 74/171/55 | 0.043 | 0.086 | no (after correction) |
+| TF-IDF → LLM zero-shot (Qwen3-0.6B) | −0.383 | 9/86/205 | 5.2 × 10⁻³³ | 3.1 × 10⁻³² | **yes (worse)** |
+| TF-IDF → LLM reranker (Qwen3-Reranker-0.6B) | +0.113 | 96/171/33 | 1.0 × 10⁻¹¹ | 5.1 × 10⁻¹¹ | **yes** |
 
-On **Recall@100**, only the hybrid is significantly better than TF-IDF (0.968 vs. 0.930, Holm p = 0.0025).
-It finds more relevant abstracts on 13 queries and **fewer on none** (13/287/0). The reranker's Recall@100
-is identical to TF-IDF's by construction, because it only reorders TF-IDF's top 100.
+On **Recall@100**, only the hybrid is significantly better than TF-IDF (0.968 vs. 0.930, Holm p = 0.0038).
+It finds more relevant abstracts on 13 queries and **fewer on none** (13/287/0). The rerankers' Recall@100
+is identical to TF-IDF's by construction, because they only reorder TF-IDF's top 100.
+
+The LLM reranker's lead holds against the strongest other systems too. These are three further paired
+Wilcoxon tests, run after seeing the results and so outside the corrected family above; all three would
+survive a Holm correction:
+
+| LLM reranker vs. | Δ nDCG@10 | W/T/L | Wilcoxon p |
+|---|---:|:---:|---:|
+| Hybrid: TF-IDF + bge (RRF) | +0.051 | 73/195/32 | 2.3 × 10⁻⁵ |
+| Dense: bge-small-en-v1.5 | +0.059 | 69/197/34 | 2.5 × 10⁻⁵ |
+| TF-IDF → cross-encoder (same 100 candidates) | +0.083 | 78/189/33 | 1.5 × 10⁻⁷ |
 
 ![Recall@k](results/figures/recall_at_k.png)
 
-The recall curves show where the semantic signal helps: at the very top of the ranking. Recall@1 is
-0.576 for bge, 0.562 for the hybrid and 0.554 for the cross-encoder, against 0.487 for TF-IDF and 0.482
-for MiniLM. Further down, TF-IDF catches up. By k = 20 it has drawn level with bge (0.884 vs. 0.873)
-and is well ahead of MiniLM (0.837). The hybrid leads at every cut-off from k = 3 onwards (Recall@20 = 0.920).
+The recall curves show where the neural signal helps: at the very top of the ranking. Recall@1 is 0.643
+for the LLM reranker, 0.576 for bge, 0.562 for the hybrid and 0.554 for the cross-encoder, against 0.487
+for TF-IDF and 0.482 for MiniLM. Further down, TF-IDF catches up. By k = 20 it has drawn level with bge
+(0.884 vs. 0.873) and is well ahead of MiniLM (0.837). The LLM reranker leads up to k = 10. From k = 20
+the hybrid leads (Recall@50 = 0.962), because the rerankers are capped at TF-IDF's Recall@100 of 0.930.
 
 ### 4.4 Efficiency
 
@@ -236,15 +255,19 @@ From [`results/efficiency.md`](results/efficiency.md) (latency = one query at a 
 
 | System | Index build | Index size | Model size | Mean latency | Hardware |
 |---|---:|---:|---:|---:|:---:|
-| TF-IDF cosine | 1.7 s | 5.1 MB | — | **0.26 ms** | CPU |
-| Dense: all-MiniLM-L6-v2 | 13.0 s | 7.6 MB | 22.7M params | 11.7 ms | GPU |
-| Dense: bge-small-en-v1.5 | 47.3 s | 7.6 MB | 33.4M params | 18.9 ms | GPU |
-| Hybrid: TF-IDF + bge | 49.0 s | 12.7 MB | 33.4M params | 21.0 ms | GPU |
-| TF-IDF → cross-encoder | 1.7 s | 5.1 MB | 22.7M params | 497 ms | GPU |
+| TF-IDF cosine | 1.0 s | 5.1 MB | — | **0.17 ms** | CPU |
+| Dense: all-MiniLM-L6-v2 | 13.0 s | 7.6 MB | 22.7M params | 7.9 ms | GPU |
+| Dense: bge-small-en-v1.5 | 47.3 s | 7.6 MB | 33.4M params | 12.5 ms | GPU |
+| Hybrid: TF-IDF + bge | 48.3 s | 12.7 MB | 33.4M params | 14.5 ms | GPU |
+| TF-IDF → cross-encoder | 1.0 s | 5.1 MB | 22.7M params | 484 ms | GPU |
+| TF-IDF → LLM zero-shot | 1.0 s | 5.1 MB | 596M params | 5,729 ms | GPU |
+| TF-IDF → LLM reranker | 1.0 s | 5.1 MB | 596M params | 5,789 ms | GPU |
 
-TF-IDF answers a query about **70× faster than bge-small and ~1,900× faster than cross-encoder
-reranking**. It needs no GPU, no model download and only 1.7 s to index. The cross-encoder is the most
-expensive because it runs a full transformer forward pass for each of the 100 candidates per query.
+TF-IDF answers a query about **70× faster than bge-small, ~2,800× faster than cross-encoder reranking
+and ~34,000× faster than LLM reranking**. It needs no GPU, no model download and about a second to index.
+The rerankers are expensive because they run a full transformer forward pass for each of the 100
+candidates per query; the LLM has 26× the cross-encoder's parameters and takes 12× as long. Each LLM run
+over the 300 test queries took about 29 minutes on the laptop GPU.
 
 ## 5. Analysis: where does each approach win?
 
@@ -256,7 +279,8 @@ The average hides a lot of disagreement between the systems. bge-small beats TF-
 **TF-IDF beats bge-small on 51**, and 164 are tied. 154 of those ties are queries where both systems are
 perfect (129) or both score zero (25). The two methods fail on largely *different* queries: TF-IDF scores
 zero on 48 queries and bge on 46, but only 25 of these are shared. That complementarity is why fusing
-them works. The hybrid scores zero on only 34 queries, and never loses recall.
+them works. The hybrid scores zero on only 34 queries, and never loses recall. The LLM reranker scores
+zero on 31. It rescues 24 of TF-IDF's 48 failures and loses only 7 queries that TF-IDF had found.
 
 ### 5.2 Vocabulary mismatch
 
@@ -266,24 +290,31 @@ each test query gets a **lexical overlap** score: the share of its index terms (
 and stemming) that appear in its relevant abstract(s). The queries are then split into three equal
 groups (from [`results/overlap_buckets.md`](results/overlap_buckets.md)):
 
-| Overlap tercile | Overlap range | TF-IDF | MiniLM | bge-small | Hybrid | TF-IDF → CE |
-|---|:---:|---:|---:|---:|---:|---:|
-| low | 0.00–0.45 | 0.369 | 0.371 | 0.438 | 0.448 | 0.360 |
-| medium | 0.47–0.75 | 0.719 | 0.733 | 0.785 | 0.796 | 0.792 |
-| high | 0.75–1.00 | 0.888 | 0.831 | 0.914 | 0.921 | 0.917 |
+| Overlap tercile | Overlap range | TF-IDF | MiniLM | bge-small | Hybrid | → CE | → LLM zero-shot | → LLM reranker |
+|---|:---:|---:|---:|---:|---:|---:|---:|---:|
+| low | 0.00–0.45 | 0.369 | 0.371 | 0.438 | 0.448 | 0.360 | 0.110 | **0.530** |
+| medium | 0.47–0.75 | 0.719 | 0.733 | 0.785 | 0.796 | 0.792 | 0.292 | **0.835** |
+| high | 0.75–1.00 | 0.888 | 0.831 | 0.914 | 0.921 | 0.917 | 0.424 | **0.951** |
+
+(→ = reranking TF-IDF's top 100.)
 
 ![nDCG@10 by vocabulary overlap](results/figures/overlap_buckets.png)
 
 - **Every** system degrades as overlap falls. Even the neural models do much better when the
   vocabularies agree, and all of them find the low-overlap third hard.
-- TF-IDF depends on overlap the most: Spearman ρ between overlap and per-query nDCG@10 is 0.60 for TF-IDF,
-  against 0.54 for bge and 0.48 for MiniLM.
+- TF-IDF depends on overlap the most: Spearman ρ between overlap and per-query nDCG@10 is 0.60 for TF-IDF
+  (0.61 for the cross-encoder, which inherits TF-IDF's candidates), against 0.54 for bge, 0.52 for the LLM
+  reranker and 0.48 for MiniLM.
 - bge's advantage over TF-IDF is largest when overlap is low or medium (+0.069, +0.066) and shrinks to
   +0.026 when overlap is high. With high overlap, TF-IDF (0.888) clearly beats the general-purpose MiniLM
   (0.831).
 - The cross-encoder helps a lot in the medium tercile (+0.073) but **not** in the low one (0.360 vs. 0.369).
-  A reranker cannot recover a document that the first stage never retrieved: TF-IDF misses a relevant
-  abstract from its top 100 on 23 queries. In this setup TF-IDF's recall is the ceiling.
+  A reranker cannot recover a document that the first stage never retrieved: on 20 queries none of the
+  relevant abstracts is in TF-IDF's top 100. In this setup TF-IDF's recall is the ceiling.
+- The LLM reranker is the best system in every tercile, and its gain over TF-IDF is largest exactly where
+  TF-IDF is weakest: +0.161 at low overlap, +0.116 at medium, +0.063 at high. Unlike the cross-encoder, it
+  *does* lift the low-overlap claims whose relevant abstract is somewhere in the 100 candidates: it
+  recognises a relevant abstract that shares few words with the claim, even though TF-IDF put it low.
 
 ### 5.3 Illustrative queries
 
@@ -296,12 +327,14 @@ leukemia"*. The tokenizer turns "BCL-2" into `bcl` + `2`, while the claim's "Bcl
 gene name, the most informative word in the claim, never matches. TF-IDF ranks the abstract **32nd**.
 Its top hit is a different paper that spells "Bcl2" the same way the claim does. Both dense models rank
 the right abstract **1st**, because their subword tokenizers and learned representations treat *Bcl2*,
-*BCL-2* and *antiapoptotic* as related.
+*BCL-2* and *antiapoptotic* as related. The LLM reranker, reading TF-IDF's 100 candidates, also puts it
+1st.
 
 **Semantic search wins — paraphrase.**
 *"The treatment of cancer patients with co-IR blockade does not cause any adverse autoimmune events."*
 The relevant abstract is *"Is autoimmunity the Achilles' heel of cancer immunotherapy?"*. The claim and
-the abstract describe the same idea in different words. TF-IDF ranks it 11th; both dense models rank it 1st.
+the abstract describe the same idea in different words. TF-IDF ranks it 11th; both dense models and the
+LLM reranker rank it 1st, while the cross-encoder leaves it 12th.
 
 **TF-IDF wins — a rare, exact technical term.**
 *"Ivermectin is used to treat onchocerciasis."*
@@ -311,14 +344,78 @@ gets the maximum possible idf, and TF-IDF ranks the abstract **1st**. bge-small 
 not in its top 100. bge's top hit is an abstract about antihypertensive drug therapy. A likely
 explanation is that the dense models have only a vague representation of such a rare disease name and
 fall back on the general "drug treatment" meaning of the claim. This is the classic strength of exact
-matching: rare, precise terms such as gene, drug and disease names.
+matching: rare, precise terms such as gene, drug and disease names. The cross-encoder moves the abstract
+down to 57th; the LLM reranker, which reads the full abstract, keeps it 1st.
 
 **TF-IDF wins — high overlap, subtle topic.**
 *"LDL cholesterol has no involvement in the development of cardiovascular disease."*
 Five of six query terms occur in the relevant abstract (a genome-wide association study of LDL
 cholesterol), and TF-IDF ranks it 1st. bge ranks it 10th, preferring a review of *HDL* cholesterol and
 statin treatment. This is topically close, but the dense embedding blurs the precise LDL/HDL
-distinction that exact term matching keeps.
+distinction that exact term matching keeps. The LLM reranker keeps it 1st as well.
+
+In all four examples the fine-tuned LLM reranker ranks the relevant abstract 1st. The zero-shot LLM
+ranks it 7th, 30th, 51st and 28th.
+
+### 5.4 Error analysis
+
+From [`results/error_analysis.md`](results/error_analysis.md). A claim **fails** for a system when none of
+its relevant abstracts is in the top 10 (nDCG@10 = 0). To ask *why* systems fail, each claim is put in
+one category using only the claim and its relevant abstract(s), so the categories are the same for
+every system. The rules apply in order:
+
+1. **spelling variant**: a claim word is written differently in the abstract (*Bcl2* / *BCL-2*,
+   *birth weight* / *birthweight*);
+2. **vocabulary mismatch**: fewer than half of the claim's index terms occur in the abstract;
+3. **rare shared term**: a shared term occurs in at most 10 of the 5,183 abstracts;
+4. **common words only**: everything else.
+
+| Category | Claims | TF-IDF | MiniLM | bge | Hybrid | → CE | → LLM zero-shot | → LLM reranker |
+|---|---:|---:|---:|---:|---:|---:|---:|---:|
+| spelling variant | 15 | 2 (13%) | 0 | 0 | 0 | 0 | 4 (27%) | 0 |
+| vocabulary mismatch | 99 | 34 (34%) | 47 (47%) | 38 (38%) | 31 (31%) | 43 (43%) | 76 (77%) | 27 (27%) |
+| rare shared term | 106 | **0 (0%)** | 6 (6%) | 1 (1%) | 0 | 3 (3%) | 35 (33%) | 1 (1%) |
+| common words only | 80 | 12 (15%) | 9 (11%) | 7 (9%) | 3 (4%) | 6 (8%) | 44 (55%) | 3 (4%) |
+| **all claims** | 300 | 48 (16%) | 62 (21%) | 46 (15%) | 34 (11%) | 52 (17%) | 159 (53%) | 31 (10%) |
+
+- **Vocabulary mismatch is the hard core of the task.** A third of the claims fall in it, and it holds
+  most failures of *every* system, the LLM reranker included (27 of its 31). Neural models reduce the
+  problem; they do not remove it.
+- **Rare shared terms are TF-IDF's home ground.** In the 106 claims that share a rare term with their
+  relevant abstract, TF-IDF never fails, while MiniLM fails 6 times and the cross-encoder 3 times.
+- **Spelling variants are the one category where TF-IDF fails and every neural model succeeds** (2 of 15
+  claims, e.g. *Bcl2*). Subword tokenizers make the neural models robust to hyphenation.
+- **"Common words only"** claims (all shared terms appear in more than 10 abstracts) are where combining
+  signals pays most: the hybrid and the LLM reranker fail on 4%, TF-IDF on 15%.
+
+**Reranker failures: first stage or reranker?** A reranker failure is either a relevant abstract that
+TF-IDF never retrieved, which no reranker can fix, or one the reranker saw but ranked below 10:
+
+| Reranker | Failures | TF-IDF never retrieved it | Reranker ranked it low |
+|---|---:|---:|---:|
+| Cross-encoder | 52 | 20 | 32 |
+| LLM zero-shot | 159 | 20 | 139 |
+| LLM reranker | 31 | 20 | **11** |
+
+Two thirds of the LLM reranker's failures (20 of 31) are first-stage misses. It almost never misjudges an
+abstract it is shown. The obvious next step is a stronger first stage, such as the hybrid, whose top 100
+holds 96.8% of the relevant abstracts against TF-IDF's 93.0%.
+
+**Why the zero-shot LLM fails.** The share of TF-IDF candidates each LLM answered "yes" to (P(yes) > 0.5),
+out of 29,889 judged (claim, abstract) pairs, where roughly 1 candidate in 100 is relevant:
+
+| LLM | Answered "yes" to all candidates | … to the relevant candidates |
+|---|---:|---:|
+| Qwen3-0.6B, zero-shot | **100.0%** | 100.0% |
+| Qwen3-Reranker-0.6B (fine-tuned) | 2.3% | 75.0% |
+
+The general model says "yes" to **every** abstract. Its ranking therefore rests on small differences in
+an always-high confidence, which carry little information about relevance. The result is worse than
+simply keeping TF-IDF's order: it beats TF-IDF on only 9 claims and loses on 205. Fine-tuned on
+relevance judgements, the *same* architecture is well calibrated. It says "yes" to 2.3% of candidates,
+close to the true rate of about 1%, and to three quarters of the relevant ones. A 0.6B-parameter model
+does not follow the instruction "answer yes or no" discriminatively from prompting alone; task training
+supplies that.
 
 ## 6. Discussion
 
@@ -333,15 +430,28 @@ answers. A *general-purpose* sentence embedding (MiniLM) does not. The training 
 than "neural vs. classical". Cross-encoder reranking adds +0.031, but it is limited by what TF-IDF
 retrieves and is not significant after correction.
 
-**Best of both: the hybrid.** The two approaches fail on different queries (§5.1), so fusing their
-rankings gives the best system on every headline metric: nDCG@10 0.722, Recall@100 0.968. It never
-loses a relevant document that TF-IDF had found, and it needs only RRF, with no weights to tune. Hybrid
-lexical + dense retrieval is also the standard design in production search systems.
+**Does an LLM beat it?** It depends entirely on how the LLM is used. Fine-tuned for relevance judgement,
+a 0.6B-parameter LLM reranking TF-IDF's top 100 is the best system in the study: nDCG@10 0.772, +0.113
+(+17%) over TF-IDF. It is significantly better than every other system, including the hybrid and the
+cross-encoder, which reorders exactly the same candidates. Used zero-shot, the *same* model is the
+worst system by far (0.276), because it answers "yes" to every abstract (§5.4). This mirrors the MiniLM/bge
+contrast at a larger scale: what makes a model good at retrieval is training on the retrieval task,
+not its size or architecture.
 
-**At what cost?** TF-IDF is around 70× faster than dense search and ~1,900× faster than cross-encoder
-reranking, runs on any CPU, indexes in under 2 seconds, and its scores can be explained term by term.
-The neural systems need a GPU (or much more time), model downloads and re-encoding when the corpus
-changes. Their scores are opaque.
+**Best of both worlds.** The approaches fail on different queries (§5.1), so combining them beats each
+alone. The two combinations in the study do different jobs. The hybrid is the best *first stage*: it
+never loses a relevant document TF-IDF had found and has the highest Recall@100 (0.968), with no weights
+to tune. The LLM reranker is the best *final ranking*, but two thirds of its failures are relevant
+abstracts TF-IDF never retrieved. A hybrid first stage with an LLM reranker on top is therefore the
+natural next design. It is the standard architecture of modern search systems: cheap retrieval of
+candidates, then an expensive model on a short list.
+
+**At what cost?** TF-IDF is about 70× faster than dense search, ~2,800× faster than cross-encoder
+reranking and ~34,000× faster than LLM reranking (0.17 ms vs. 5.8 s per query). It runs on any CPU,
+indexes in about a second, and its scores can be explained term by term. The neural systems need a GPU
+(or much more time) and model downloads, and dense retrieval must re-encode the corpus when it changes.
+Their scores are opaque. The LLM's yes-probability reads like an explanation, but it says nothing about
+*why*.
 
 | Prefer TF-IDF when | Prefer semantic search when |
 |---|---|
@@ -355,35 +465,45 @@ changes. Their scores are opaque.
 - **One dataset.** SciFact is scientific and small (5k documents). The balance could shift on other
   domains, for example conversational queries or long documents.
 - **Truncation.** The bi-encoders read at most 256 (MiniLM) or 512 (bge) tokens per document, and the
-  cross-encoder 512 tokens per pair, so the ends of long abstracts are ignored. TF-IDF sees the whole text.
+  cross-encoder and the LLMs 512 tokens per prompt, so the ends of long abstracts are ignored. TF-IDF sees
+  the whole text.
 - **Sparse judgments.** Most queries have one relevant abstract, so a single rank change moves a query's
   score a lot, and unjudged-but-relevant documents count as misses. The bootstrap intervals (±0.04)
   reflect this.
 - **Tie-splitting.** The overlap terciles break ties in query order to keep the groups equal in size, so
   0.75 appears in two buckets.
-- **Model scale.** Only small encoder models (22–33M parameters) were tested. Larger embedding models or a
-  generative-LLM reranker would likely score higher, at a much greater computational cost.
+- **Model scale.** Only models up to 0.6B parameters fit the 4 GB laptop GPU. Larger LLMs, or API models,
+  would likely score higher, and a larger general LLM might work zero-shot where the 0.6B one fails, at a
+  much greater computational cost.
+- **One prompt.** The LLMs use the instruction their authors use for SciFact. It was fixed in advance and
+  not tuned (tuning it on the test claims would not be fair); other prompts could help the zero-shot model.
+- **Reranking depth.** All rerankers see only TF-IDF's top 100, so their Recall@100 is capped at 0.930.
 - **Efficiency numbers** come from one laptop and include Python overhead; they are only meant as
   relative comparisons.
 
 ## 8. Conclusion
 
 A from-scratch TF-IDF/cosine system with sublinear tf, idf weighting, stopword removal and stemming is
-a strong, fast and transparent baseline on scientific claim retrieval (nDCG@10 = 0.659). A
-retrieval-trained semantic model (bge-small) is significantly more effective (0.713), mainly because it
-copes with vocabulary mismatch. TF-IDF still wins on queries that hinge on rare, exact terms, and the
-general-purpose MiniLM model does not beat it at all. The best results come from **combining** the two
-(hybrid RRF: 0.722 nDCG@10, 0.968 Recall@100). Classical and semantic retrieval are complementary, and
-the classical method remains far cheaper.
+a strong, fast and transparent baseline on scientific claim retrieval (nDCG@10 = 0.659). POS tagging and
+noun-phrase chunking, tested as lemmatization and phrase indexing, did not improve on plain stemming.
+A retrieval-trained semantic model (bge-small) is significantly more effective (0.713), mainly because
+it copes with vocabulary mismatch. TF-IDF still wins on queries that hinge on rare, exact terms: it never
+fails when a claim shares a rare term with its answer. The general-purpose MiniLM model does not beat it
+at all. An LLM fine-tuned for relevance, reranking TF-IDF's candidates, is the most effective system
+(0.772), while the same LLM used zero-shot is the least (0.276): task training, not model type, decides
+the outcome. The best results come from **combining** classical and neural methods. The hybrid gives the
+best recall (0.968 Recall@100), and TF-IDF retrieval followed by LLM reranking gives the best ranking.
+The classical method remains thousands of times cheaper.
 
 ## 9. Reproducing the results
 
 ```sh
 uv sync
-uv run pytest                 # 65 tests (6 marked slow: data download + real models)
-uv run irsys evaluate         # → results/*.md, *.csv, runs/*.trec, config.json
-uv run irsys analyze          # → results/figures/*.png, overlap_buckets.md, examples.md
+uv run pytest                 # 127 tests (12 marked slow: data download + real models)
+uv run irsys evaluate         # → results/*.md, *.csv, runs/*.trec, config.json  (~1 h on an RTX 3050)
+uv run irsys analyze          # → results/figures/*.png, overlap_buckets.md, error_analysis.md, examples.md
 uv run irsys search "your claim here" -k 5
+uv run irsys demo             # interactive demo (DEMO.md)
 ```
 
 The selected TF-IDF configuration, model names, device and library versions are recorded in
@@ -392,12 +512,19 @@ The selected TF-IDF configuration, model names, device and library versions are 
 
 ## References
 
+- Bird, S., Klein, E., & Loper, E. (2009). *Natural Language Processing with Python* (NLTK). O'Reilly.
 - Cormack, G. V., Clarke, C. L. A., & Büttcher, S. (2009). Reciprocal rank fusion outperforms Condorcet and individual rank learning methods. *SIGIR*.
 - *Fantastic (small) Retrievers and How to Train Them: mxbai-edge-colbert-v0 Tech Report* (2025). *arXiv:2510.14880* (BEIR appendix, Table 16: reference SciFact nDCG@10 for bge-small-en-v1.5 and all-MiniLM-L6-v2).
-- Manning, C. D., Raghavan, P., & Schütze, H. (2008). *Introduction to Information Retrieval*, ch. 6 (Scoring, term weighting and the vector space model). Cambridge University Press.
+- Justeson, J. S., & Katz, S. M. (1995). Technical terminology: some linguistic properties and an algorithm for identification in text. *Natural Language Engineering*, 1(1), 9–27.
+- Manning, C. D., Raghavan, P., & Schütze, H. (2008). *Introduction to Information Retrieval*, §2.4.1 (biword indexes) and ch. 6 (Scoring, term weighting and the vector space model). Cambridge University Press.
+- Marcus, M. P., Santorini, B., & Marcinkiewicz, M. A. (1993). Building a large annotated corpus of English: The Penn Treebank. *Computational Linguistics*, 19(2), 313–330.
+- Miller, G. A. (1995). WordNet: A lexical database for English. *Communications of the ACM*, 38(11), 39–41.
 - Nogueira, R., & Cho, K. (2019). Passage re-ranking with BERT. *arXiv:1901.04085*.
+- Nogueira, R., Jiang, Z., Pradeep, R., & Lin, J. (2020). Document ranking with a pretrained sequence-to-sequence model. *Findings of EMNLP*.
+- Qwen Team (2025). Qwen3 technical report. *arXiv:2505.09388*.
 - Reimers, N., & Gurevych, I. (2019). Sentence-BERT: Sentence embeddings using Siamese BERT-networks. *EMNLP*.
 - Salton, G., & Buckley, C. (1988). Term-weighting approaches in automatic text retrieval. *Information Processing & Management*, 24(5).
 - Thakur, N., Reimers, N., Rücklé, A., Srivastava, A., & Gurevych, I. (2021). BEIR: A heterogeneous benchmark for zero-shot evaluation of information retrieval models. *NeurIPS Datasets and Benchmarks*.
 - Wadden, D., Lin, S., Lo, K., Wang, L. L., van Zuylen, M., Cohan, A., & Hajishirzi, H. (2020). Fact or fiction: Verifying scientific claims. *EMNLP*.
 - Xiao, S., Liu, Z., Zhang, P., & Muennighoff, N. (2023). C-Pack: Packaged resources to advance general Chinese embedding (BGE). *arXiv:2309.07597*.
+- Zhang, Y., Li, M., Long, D., et al. (2025). Qwen3 Embedding: Advancing text embedding and reranking through foundation models. *arXiv:2506.05176*.

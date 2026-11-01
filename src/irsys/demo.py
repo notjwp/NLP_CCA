@@ -166,6 +166,10 @@ def highlight(text: str, analyzer: Analyzer, terms: set[str]) -> str:
     return "".join(out)
 
 
+def _duration(ms: float) -> str:
+    return f"{ms / 1000:.1f} s" if ms >= 1000 else f"{ms:.1f} ms"
+
+
 def _snippet(text: str, limit: int = 230) -> str:
     return text if len(text) <= limit else text[:limit].rsplit(" ", 1)[0] + " …"
 
@@ -199,7 +203,7 @@ def render_results(results: list[SystemResult], analyzer: Analyzer, query: str,
         columns.append(
             f'<section class="col"><header style="border-top-color:{color}"><h3>{html.escape(res.name)}</h3>'
             + (f'<div class="blurb">{html.escape(res.description)}</div>' if res.description else "")
-            + f'<div class="meta">answered in {res.latency_ms:,.1f} ms</div>{badge}</header><ol>{body}</ol></section>'
+            + f'<div class="meta">answered in {_duration(res.latency_ms)}</div>{badge}</header><ol>{body}</ol></section>'
         )
     for name, color in zip(pending or [], (SYSTEM_COLORS * 2)[len(results):]):
         columns.append(
@@ -410,8 +414,8 @@ def render_llm_explanation(engine: DemoEngine, query: str, llm_result: SystemRes
 CSS = """
 .irsys { font-size: 14px; }
 .irsys mark { background: #fde68a; color: #111; padding: 0 2px; border-radius: 3px; }
-.irsys .note { color: var(--body-text-color-subdued); margin: 4px 0 12px; }
-.irsys .grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(300px, 1fr)); gap: 14px; }
+.irsys .note { color: var(--body-text-color); opacity: 0.8; margin: 4px 0 12px; }
+.irsys .grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(235px, 1fr)); gap: 12px; }
 .irsys .col { border: 1px solid var(--border-color-primary); border-radius: 10px; background: var(--block-background-fill); overflow: hidden; }
 .irsys .col header { border-top: 5px solid; padding: 10px 12px 8px; border-bottom: 1px solid var(--border-color-primary); }
 .irsys .col h3 { margin: 0; font-size: 15px; }
@@ -533,13 +537,10 @@ def build_app(engine: DemoEngine):
             with gr.Tab("4 · Results on all 300 test claims"):
                 gr.Markdown(_metrics_markdown())
                 figures = RESULTS_DIR / "figures"
-                for row in (["main_metrics"], ["overlap_buckets", "recall_at_k"], ["per_query_delta"]):
-                    with gr.Row():
-                        for name in row:
-                            if (figures / f"{name}.png").exists():
-                                with gr.Column():
-                                    gr.Image(str(figures / f"{name}.png"), show_label=False, interactive=False)
-                                    gr.Markdown(f"*{FIGURE_CAPTIONS[name]}*")
+                for name in FIGURE_CAPTIONS:  # one per row: big enough to read on a projector
+                    if (figures / f"{name}.png").exists():
+                        gr.Image(str(figures / f"{name}.png"), show_label=False, interactive=False)
+                        gr.Markdown(f"*{FIGURE_CAPTIONS[name]}*")
 
         state = gr.State()
         fast_outputs = [results, explanation, llm_explanation, state]
