@@ -119,6 +119,33 @@ def test_rendered_results_explain_each_system_in_plain_words(engine):
     assert "Matches the words." in html and "Matches the meaning." in html
 
 
+def test_result_cards_show_positions_not_raw_scores(engine):
+    html = render_results(engine.compare(QUERIES["q1"], k=2), ANALYZER, QUERIES["q1"])
+    assert "#1" in html and "score" not in html.lower()
+
+
+def test_simple_results_table_has_the_four_metrics_that_matter(tmp_path):
+    import pandas as pd
+
+    from irsys.demo import simple_results_table
+
+    names = {"tfidf": "TF-IDF cosine", "dense-bge": "Dense: bge", "tfidf-llm-zs": "LLM zero-shot"}
+    pd.DataFrame({"system": list(names), "name": list(names.values()), "nDCG@10": [0.5, 0.7, 0.1],
+                  "R@100": [0.93, 0.95, 0.93]}).to_csv(tmp_path / "metrics.csv", index=False)
+    (tmp_path / "efficiency.md").write_text(
+        "Latency note.\n\n" + pd.DataFrame({"System": list(names.values()), "Mean latency (ms)": [0.17, 12.46, 5728.7]})
+        .to_markdown(index=False), encoding="utf-8")
+    scores = {"tfidf": [0.5] * 30, "dense-bge": [1.0] * 25 + [0.5] * 5, "tfidf-llm-zs": [0.0] * 25 + [0.5] * 5}
+    pd.DataFrame([{"system": s, "qid": str(i), "nDCG@10": v} for s, vs in scores.items() for i, v in enumerate(vs)]
+                 ).to_csv(tmp_path / "per_query.csv", index=False)
+
+    table = simple_results_table(tmp_path)
+    assert "| System | Grade (nDCG@10) | Correct paper in top 100 | Time per claim | Better than TF-IDF? |" in table
+    assert "| Word matching · TF-IDF (ours) | 0.500 | 93% | 0.17 ms | — (baseline) |" in table
+    assert "| Meaning matching · bge-small | 0.700 | 95% | 12.5 ms | yes |" in table
+    assert "| LLM, prompted only | 0.100 | 93% | 5.7 s | no, worse |" in table
+
+
 def test_slow_answers_are_shown_in_seconds():
     from irsys.demo import SystemResult
 

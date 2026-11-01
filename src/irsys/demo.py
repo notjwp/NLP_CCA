@@ -167,7 +167,9 @@ def highlight(text: str, analyzer: Analyzer, terms: set[str]) -> str:
 
 
 def _duration(ms: float) -> str:
-    return f"{ms / 1000:.1f} s" if ms >= 1000 else f"{ms:.1f} ms"
+    if ms >= 1000:
+        return f"{ms / 1000:.1f} s"
+    return f"{ms:.2f} ms" if ms < 1 else f"{ms:.1f} ms"
 
 
 def _snippet(text: str, limit: int = 230) -> str:
@@ -194,8 +196,7 @@ def render_results(results: list[SystemResult], analyzer: Analyzer, query: str,
             tag = '<span class="tag">✓ correct paper</span>' if h.relevant else ""
             hits.append(
                 f'<li class="hit{" relevant" if h.relevant else ""}"><div class="hit-head"><span class="rank">#{i}</span>'
-                f'<span class="score" title="Higher = better match. Compare scores only within one column.">'
-                f'score {h.score:.3f}</span>{tag}</div>'
+                f'{tag}</div>'
                 f'<div class="title">{highlight(h.title, analyzer, terms)}</div>'
                 f'<div class="snippet">{highlight(_snippet(h.text), analyzer, terms)}</div></li>'
             )
@@ -215,8 +216,7 @@ def render_results(results: list[SystemResult], analyzer: Analyzer, query: str,
             if results and results[0].judged
             else "Your own claim: nobody has marked a correct paper, so compare the lists by eye.")
     legend = (f'<p class="note">{note} <mark>Yellow</mark> words also appear in the claim (after cutting words to '
-              "their root, so <i>tumors</i> matches <i>tumor</i>). Each column shows its top 5; "
-              "scores only compare within a column.</p>")
+              "their root, so <i>tumors</i> matches <i>tumor</i>). Each column shows its top 5.</p>")
     return f'<div class="irsys">{legend}<div class="grid">{"".join(columns)}</div></div>'
 
 
@@ -342,7 +342,7 @@ def render_explanation(engine: DemoEngine, query: str) -> str:
     parts.append(
         "<h3>Step 3 · Score = how much important vocabulary the claim and the paper share</h3>"
         '<p class="note">For each word root: weight in the claim × weight in the paper. Adding these up gives the '
-        "<b>cosine similarity</b>, the score shown in tab 1. A word root missing from the paper adds 0, however "
+        "<b>cosine similarity</b>, the number TF-IDF sorts the papers by. A word root missing from the paper adds 0, however "
         "important it is.</p>"
     )
     for label, d, table, score, rank in explained:
@@ -457,30 +457,74 @@ CSS = """
 
 
 METRICS_GUIDE = """\
-**How to read the grades.** Every system searched for each of the 300 test claims, and we checked where it put
-the correct paper.
-- **nDCG@10**: the main grade, from 0 to 1. Did the correct paper appear near the top of the first 10 results?
-  1 = always first; about 0.63 = second; 0.5 = third; 0 = not in the top 10.
-- **95% CI**: the margin of error of that grade.
-- **R@100**: how often the correct paper was anywhere in the top 100.
-- MAP@100, MRR@10, P@10, R@10 are other standard ways to grade a ranking (see the report). P@10 is small for
-  everyone because most claims have only one correct paper.
+**How to read this.** Every system searched for each of the 300 test claims, and we checked where it put the
+correct paper.
+- **Grade (nDCG@10)**, from 0 to 1: how high the correct paper appears in the first 10 results. 1 = always
+  first; 0.5 ≈ usually third; 0 = not in the top 10.
+- **Correct paper in top 100**: how often it is anywhere in the first 100 results. The rerankers cannot beat
+  TF-IDF here: they only reorder its top 100.
+- **Time per claim**: one search on this laptop.
+- **Better than TF-IDF?**: a statistical test on the same 300 claims (Wilcoxon, p < 0.05) says whether the
+  difference is real or just luck.
+
+Other standard metrics (MAP, MRR, precision, recall at every cut-off) are in REPORT.md.
 """
 FIGURE_CAPTIONS = {
-    "main_metrics": "The same grades as bars. The black whiskers are the margin of error.",
     "overlap_buckets": ("Claims split into three equal groups by how many of their words appear in the correct "
                         "paper. Every system does worse when fewer words are shared; word matching suffers most."),
-    "recall_at_k": "Share of correct papers found within the top 1, 2, 3 … 100 results.",
     "per_query_delta": ("One thin bar per claim. Green: the AI embeddings did better; blue: TF-IDF did better; "
                         "flat: a tie. They win on different claims, which is why combining them works."),
 }
+PLAIN_NAMES = {
+    "tfidf": "Word matching · TF-IDF (ours)",
+    "dense-minilm": "Meaning matching · MiniLM",
+    "dense-bge": "Meaning matching · bge-small",
+    "hybrid-rrf": "Combined · words + meaning",
+    "tfidf-ce": "Cross-encoder reranker",
+    "tfidf-llm-zs": "LLM, prompted only",
+    "tfidf-llm": "LLM reranker, fine-tuned",
+}
+
+
+def _markdown_rows(text: str) -> list[dict[str, str]]:
+    """Rows of the first pipe table in ``text`` (header row, alignment row, then data)."""
+    lines = [line.strip() for line in text.splitlines() if line.strip().startswith("|")]
+
+    def cells(line: str) -> list[str]:
+        return [c.strip() for c in line.strip("|").split("|")]
+
+    return [dict(zip(cells(lines[0]), cells(line))) for line in lines[2:]] if len(lines) > 2 else []
+
+
+def simple_results_table(results_dir=RESULTS_DIR) -> str:
+    """The four numbers that matter per system, from the files ``irsys evaluate`` wrote."""
+    from irsys.stats import paired_tests
+
+    metrics = pd.read_csv(results_dir / "metrics.csv")
+    latency = {row["System"]: float(row["Mean latency (ms)"])
+               for row in _markdown_rows((results_dir / "efficiency.md").read_text(encoding="utf-8"))}
+    ndcg = pd.read_csv(results_dir / "per_query.csv", dtype={"qid": str}).pivot(
+        index="qid", columns="system", values="nDCG@10")
+    tests = paired_tests(ndcg["tfidf"], {s: ndcg[s] for s in ndcg if s != "tfidf"}).set_index("system")
+
+    rows = ["| System | Grade (nDCG@10) | Correct paper in top 100 | Time per claim | Better than TF-IDF? |",
+            "|---|---|---|---|---|"]
+    for key, name, grade, top100 in zip(metrics["system"], metrics["name"], metrics["nDCG@10"], metrics["R@100"]):
+        if key == "tfidf":
+            verdict = "— (baseline)"
+        elif tests.loc[key, "holm_p"] < 0.05:
+            verdict = "yes" if tests.loc[key, "delta"] > 0 else "no, worse"
+        else:
+            verdict = "no real difference"
+        time = _duration(latency[name]) if name in latency else "—"
+        rows.append(f"| {PLAIN_NAMES.get(key, name)} | {grade:.3f} | {top100:.0%} | {time} | {verdict} |")
+    return "\n".join(rows) + "\n"
 
 
 def _metrics_markdown() -> str:
-    path = RESULTS_DIR / "metrics.md"
-    if not path.exists():
+    if not (RESULTS_DIR / "metrics.csv").exists():
         return "Run `uv run irsys evaluate` to produce the results table."
-    return METRICS_GUIDE + "\n" + path.read_text(encoding="utf-8")
+    return METRICS_GUIDE + "\n" + simple_results_table()
 
 
 def build_app(engine: DemoEngine):

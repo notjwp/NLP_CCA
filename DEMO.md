@@ -32,7 +32,7 @@ the most accurate system and by far the slowest.
 - [ ] Copy `demo_screenshots/` into your slides as a backup (see "If something goes wrong").
 
 **10 minutes before**
-- [ ] Close the game (AURA 2) and other GPU-heavy apps; they take the GPU memory the LLM needs.
+- [ ] Close other GPU-heavy apps; they take the GPU memory the LLM needs.
 - [ ] Plug in the charger. On battery, the GPU may throttle.
 - [ ] Run `uv run irsys demo`. Wait until example ① shows all four columns.
 - [ ] Zoom the browser to **125–150 %** (`Ctrl` + `+`) so the back row can read it. The four columns stay
@@ -41,15 +41,28 @@ the most accurate system and by far the slowest.
 
 ---
 
-## Script (about 8 minutes)
+## Two presenters, one talk
 
-### 0 · Set the scene (30 s)
-> "This is a search engine over 5,183 real scientific papers from the SciFact benchmark. I type a claim, and
-> four search engines look for the paper that supports or refutes it. On the left, the **classical** system
-> I built from scratch: it matches **words**, and rare words count more. Next, an AI model that matches
-> **meaning**. Then the two combined. On the right, a **large language model** that reads each candidate
-> paper and answers yes or no. For these example claims we know the correct paper, so the page marks it
-> with a green ✓."
+The talk follows the slides in `presentation/slides.pdf` (kept out of git):
+
+| Part | Who | What |
+|---|---|---|
+| Slides 1–5 | Presenter 1 | The task, the classical TF-IDF system, the NLP steps, how the systems are judged; then the handover |
+| Slides 6–7 | Presenter 2 | The AI side and how the LLM scores |
+| Slide 8 | Presenter 2 | **This demo**, steps 0–3 below (about 3 minutes) |
+| Slides 9–12 | Presenter 2 | Results, error analysis, prompting vs. fine-tuning, conclusions |
+
+The slides already introduce the task and present the results, so inside the talk the demo runs steps 0–3 and
+skips steps 4–5. Use steps 4–5 only when demoing without the slides.
+
+## Script
+
+### 0 · Set the scene (15 s; 30 s without slides)
+> "Let's see the four systems on real claims. I type a claim, and four search engines look for the paper
+> that supports or refutes it. On the left, our **classical** system: it matches **words**, and rare words
+> count more. Next, an AI model that matches **meaning**. Then the two combined. On the right, a **large
+> language model** that reads each candidate paper and answers yes or no. For these example claims we know
+> the correct paper, so the page marks it with a green ✓."
 
 ### 1 · Example ① "Bcl2 vs BCL-2 (spelling)" (already loaded) (2 min)
 **Tab 1 · Compare**
@@ -103,7 +116,7 @@ also work well: `cancer cells hide from the immune system` (tab 2 shows *hide* i
 `children who are overweight` (meaning matching also finds "obesity in children"). Typed claims get no ✓:
 only the 300 benchmark claims have known answers (the 🎲 button picks one).
 
-### 4 · Results on all 300 test claims (1.5 min)
+### 4 · Results on all 300 test claims (1.5 min; skip when the slides follow)
 **Tab 4** has a plain-language guide above the table. The grade is **nDCG@10**: 1 = the correct paper is
 always first, 0.5 ≈ usually third, 0 = not in the top 10.
 
@@ -111,16 +124,16 @@ always first, 0.5 ≈ usually third, 0 = not in the top 10.
 |---|---|---|
 | Word matching · TF-IDF (from scratch) | 0.659 | **0.17 ms** on the CPU |
 | Meaning matching · bge-small | 0.713 | 12 ms on the GPU |
-| Combined (hybrid) | 0.722 | 14 ms |
+| Combined (hybrid) | 0.721 | 14 ms |
 | LLM zero-shot (general Qwen3, just prompted) | 0.276 | 5.7 s |
 | **LLM reranker (Qwen3 trained for this)** | **0.772** | 5.8 s |
 
-> "The LLM reranker is the best: 17% better than my TF-IDF, and significantly better than every other
+> "The LLM reranker is the best: 17% better than our TF-IDF, and significantly better than every other
 > system. But TF-IDF is about 34,000 times faster, needs no GPU, and every score can be explained word by
 > word, as tab 2 showed. And the same small LLM, only *prompted*, does far worse than TF-IDF: it says 'yes'
 > to every single paper. Training on the task matters more than the model being an LLM."
 
-### 5 · Close (30 s)
+### 5 · Close (30 s; skip when the slides follow)
 > "Classical and AI retrieval are complementary: exact words versus meaning. The best results come from
 > using them together, a fast classical first stage and an AI model on top, which is how modern search
 > engines are built."
@@ -145,8 +158,9 @@ The other two examples, if there's time:
 | Why is the zero-shot LLM so bad? | It answers "yes" to 100% of the 29,889 candidate papers, so its ranking is close to random. The same model fine-tuned for relevance says "yes" to only 2.3% of candidates but to 75% of the correct ones. A 0.6B model can't follow "answer yes or no" discriminatively from the prompt alone; training on the task fixes that. |
 | Why does the LLM still miss some? | It fails on 31 claims; on 20 of them TF-IDF never put the correct paper in its top 100, so the LLM never saw it. A better first stage (the hybrid) would fix many of these. |
 | Why not a bigger LLM? | The laptop GPU has 4 GB. A 0.6B model already takes ~5 s per claim to read 100 papers; a 7B model would not fit, and an API model would cost money per query. |
-| Why are the hybrid's scores so small (≈0.03)? | Reciprocal Rank Fusion: score = Σ 1/(60 + rank). It combines **positions**, not scores, so the systems' different score scales never need matching. |
-| Is the improvement significant? | Wilcoxon signed-rank test on the same 300 claims, Holm-corrected for 6 comparisons: LLM reranker p ≈ 5×10⁻¹¹, hybrid p ≈ 10⁻⁷, bge p = 0.008. The cross-encoder (p = 0.09) and MiniLM are not significant. The LLM reranker also beats the hybrid significantly (p ≈ 2×10⁻⁵). |
+| Why only nDCG@10? | It's the standard BEIR grade and rewards putting the correct paper high. MAP, MRR and precision are in the report and rank the systems in practically the same order. |
+| How does the hybrid merge two lists? | Reciprocal Rank Fusion: score = Σ 1/(60 + position). It combines **positions**, not scores, so the two systems' different score scales never need matching. |
+| Is the improvement significant? | Yes. A statistical test on the same 300 claims (Wilcoxon) gives p ≈ 5×10⁻¹¹ for the LLM reranker, far below 0.05, so it is not luck. bge and the hybrid are also really better than TF-IDF; MiniLM and the cross-encoder are not. (Details, including the correction for running several tests, are in the report.) |
 | Does it need a GPU? | Only the AI side. TF-IDF runs in a fraction of a millisecond on the CPU. `irsys demo --no-llm` runs without the LLM. |
 
 ---
@@ -156,7 +170,7 @@ The other two examples, if there's time:
   browser.
 - **"Address already in use":** an old demo is still running. Close that terminal, or run
   `uv run python -c "from irsys.demo import launch_demo; launch_demo(server_port=7870)"`.
-- **"CUDA out of memory":** something else is using the GPU (close the game), or start with
+- **"CUDA out of memory":** something else is using the GPU (close other heavy apps), or start with
   `uv run irsys demo --no-llm`.
 - **The laptop fails entirely:** use the backup screenshots in `demo_screenshots/`, in script order:
 
