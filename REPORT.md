@@ -508,7 +508,7 @@ The classical method remains thousands of times cheaper.
 
 ```sh
 uv sync
-uv run pytest                 # 127 tests (12 marked slow: data download + real models)
+uv run pytest                 # 133 tests (12 marked slow: data download + real models)
 uv run irsys evaluate         # → results/*.md, *.csv, runs/*.trec, config.json  (~1 h on an RTX 3050)
 uv run irsys rescore          # recompute the metric files from the saved runs (no models)
 uv run irsys analyze          # → results/figures/*.png, overlap_buckets.md, error_analysis.md, examples.md
