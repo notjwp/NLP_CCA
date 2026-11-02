@@ -189,7 +189,7 @@ def evaluate(results_dir: Path = RESULTS_DIR) -> None:
         "gpu": torch.cuda.get_device_name(0) if torch.cuda.is_available() else None,
         "torch": torch.__version__,
         "python": platform.python_version(),
-    }, indent=2), encoding="utf-8")
+    }, indent=2, ensure_ascii=False), encoding="utf-8")
     _log(f"Done. Results in {results_dir}")
 
 
