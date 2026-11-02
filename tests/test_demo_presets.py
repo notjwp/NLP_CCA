@@ -21,7 +21,7 @@ def test_every_preset_has_a_story():
 
 @pytest.mark.parametrize("label, qid", PRESETS)
 def test_preset_story_holds(engine, label, qid):
-    tfidf, semantic, _hybrid, llm = engine.compare(engine.queries[qid], k=5)
+    tfidf, semantic, llm = engine.compare(engine.queries[qid], k=5)
     tfidf_rank, semantic_rank = tfidf.correct_rank or 10**6, semantic.correct_rank or 10**6
     if WINNER[qid] == "semantic":
         assert semantic_rank == 1 and tfidf_rank > 5

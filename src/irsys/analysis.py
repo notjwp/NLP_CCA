@@ -17,14 +17,10 @@ from sklearn.feature_extraction.text import ENGLISH_STOP_WORDS
 from irsys.data import RESULTS_DIR, doc_text, load_scifact
 from irsys.preprocess import Analyzer
 
-# Validated categorical palette (dataviz reference, slots 1-7, light surface); color follows the system.
+# Validated categorical palette (dataviz reference, light surface); color follows the system.
 COLORS = {
     "tfidf": "#2a78d6",
-    "dense-minilm": "#eb6834",
     "dense-bge": "#1baf7a",
-    "hybrid-rrf": "#eda100",
-    "tfidf-ce": "#e87ba4",
-    "tfidf-llm-zs": "#008300",
     "tfidf-llm": "#6250d6",
 }
 SURFACE, INK, INK_2, MUTED, GRID, BASELINE = "#fcfcfb", "#0b0b0b", "#52514e", "#898781", "#e1e0d9", "#c3c2b7"
@@ -209,7 +205,7 @@ def plot_per_query_delta(per_query: pd.DataFrame, names: dict[str, str], path: P
     ax.set_ylim(-1.05, 1.05)
     ax.set_xlabel("Test queries, sorted by difference")
     ax.set_ylabel("ΔnDCG@10 (bge − TF-IDF)")
-    ax.set_title("Per-query difference: dense bge-small vs. TF-IDF")
+    ax.set_title("Per-query difference: semantic search (bge-small) vs. TF-IDF")
     ax.grid(axis="x", visible=False)
     handles = [plt.Rectangle((0, 0), 1, 1, color=COLORS["dense-bge"]), plt.Rectangle((0, 0), 1, 1, color=COLORS["tfidf"])]
     ax.legend(handles, [f"{names['dense-bge']} better ({wins} queries)", f"{names['tfidf']} better ({losses} queries)"],
@@ -319,8 +315,8 @@ def _write_error_analysis(results_dir, queries, qrels, corpus, texts, analyzer, 
     if rerankers:
         rows = [{"system": names[s], **rerank_failures(ranks["tfidf"], ranks[s])} for s in rerankers]
         parts += [
-            "\n## 2. Rerankers: first-stage misses vs. reranking mistakes\n\n"
-            "The rerankers only reorder TF-IDF's top 100. A failure is either a relevant abstract TF-IDF never "
+            "\n## 2. LLM reranker: first-stage misses vs. reranking mistakes\n\n"
+            "The LLM reranker only reorders TF-IDF's top 100. A failure is either a relevant abstract TF-IDF never "
             "retrieved (no reranker can fix it) or one the reranker saw but placed below rank 10.\n\n",
             pd.DataFrame(rows).to_markdown(index=False) + "\n",
         ]
@@ -336,8 +332,8 @@ def _write_error_analysis(results_dir, queries, qrels, corpus, texts, analyzer, 
                          "answered yes (P(yes) > 0.5)": f"{100 * (every > 0).mean():.1f}%",
                          "relevant candidates answered yes": f"{100 * (rel > 0).mean():.1f}%"})
         parts += [
-            "\n## 3. How the LLMs answer\n\n"
-            "Each LLM is asked whether an abstract meets the claim's information need and may only answer "
+            "\n## 3. How the LLM answers\n\n"
+            "The LLM is asked whether an abstract meets the claim's information need and may only answer "
             "yes or no; its score is log P(yes)/P(no). Share of the TF-IDF candidates it answered *yes* "
             "(most candidates are not relevant: about 1 in 100 is):\n\n",
             pd.DataFrame(rows).to_markdown(index=False) + "\n",

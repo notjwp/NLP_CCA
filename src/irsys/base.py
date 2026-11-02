@@ -1,4 +1,4 @@
-"""Common retriever interface so evaluation, fusion and the CLI treat every system alike."""
+"""Common retriever interface so evaluation, reranking and the CLI treat every system alike."""
 
 import numpy as np
 

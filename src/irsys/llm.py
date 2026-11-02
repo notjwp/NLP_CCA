@@ -4,11 +4,8 @@ The prompt gives the model an instruction, the claim and one abstract, and allow
 "yes" or "no" as the answer. Instead of generating text, we read the model's next-token
 logits for "yes" and "no": the relevance score is their difference, the log-odds of
 P(yes) (pointwise relevance judgement, as in monoT5 and Qwen3-Reranker; Zhang et al., 2025).
-Like the cross-encoder, it reranks a first stage's top candidates via ``RerankRetriever``.
-
-The same prompt runs on two LLMs of identical size and architecture:
-  * Qwen3-0.6B: a general chat LLM, used zero-shot (prompting only);
-  * Qwen3-Reranker-0.6B: the same LLM fine-tuned to answer exactly this question.
+It reranks TF-IDF's top candidates via ``RerankRetriever``. The model is Qwen3-Reranker-0.6B,
+a 0.6B-parameter Qwen3 LLM fine-tuned to answer exactly this question.
 """
 
 import numpy as np

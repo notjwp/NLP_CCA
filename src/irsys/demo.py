@@ -26,17 +26,15 @@ PRESETS = [
     ("③ Rare disease name", "660"),
     ("④ LDL vs HDL", "674"),
 ]
-TFIDF_NAME = "Word matching · TF-IDF"
-SEMANTIC_NAME = "Meaning matching · AI embeddings"
-HYBRID_NAME = "Combined · words + meaning"
+TFIDF_NAME = "Word matching · TF-IDF + cosine"
+SEMANTIC_NAME = "Meaning matching · semantic search"
 LLM_NAME = "LLM reranker · Qwen3"
 DESCRIPTIONS = {
-    TFIDF_NAME: "Your classical system: finds papers that use the claim's words. Rare words count more.",
+    TFIDF_NAME: "Our classical system: finds papers that use the claim's words. Rare words count more.",
     SEMANTIC_NAME: "A neural language model (bge-small) turns each text into a “meaning vector” and compares those.",
-    HYBRID_NAME: "Merges the two lists on the left: papers ranked high by either one move up.",
     LLM_NAME: "A large language model reads the claim with each of TF-IDF's top 100 papers and answers yes or no.",
 }
-SYSTEM_COLORS = ["#2a78d6", "#1baf7a", "#eda100", "#6250d6"]  # same colors as the report figures
+SYSTEM_COLORS = ["#2a78d6", "#1baf7a", "#6250d6"]  # same colors as the report figures
 _WORD_RE = re.compile(r"[A-Za-z0-9]+")
 
 
@@ -79,7 +77,6 @@ class DemoEngine:
     def load(cls, llm: bool = True) -> "DemoEngine":
         from irsys.dense import DenseRetriever
         from irsys.evaluate import BGE, BGE_QUERY_PROMPT, LLM_RERANKER, RUN_DEPTH
-        from irsys.fusion import RRFHybrid
 
         corpus, queries, qrels = load_scifact("test")
         doc_ids = list(corpus)
@@ -89,11 +86,7 @@ class DemoEngine:
             "scheme": "lsc.lsc", "stem": True, "stopwords": True}
         tfidf = TfidfRetriever(Analyzer.from_config(cfg), cfg["scheme"]).index(doc_ids, texts)
         bge = DenseRetriever(BGE, query_prompt=BGE_QUERY_PROMPT).index(doc_ids, texts)
-        systems: dict[str, Retriever] = {
-            TFIDF_NAME: tfidf,
-            SEMANTIC_NAME: bge,
-            HYBRID_NAME: RRFHybrid([tfidf, bge]),
-        }
+        systems: dict[str, Retriever] = {TFIDF_NAME: tfidf, SEMANTIC_NAME: bge}
         if llm:
             from irsys.llm import LLMReranker
             from irsys.rerank import RerankRetriever
@@ -476,17 +469,13 @@ FIGURE_CAPTIONS = {
     "main_metrics": "The six metrics at k = 10, one panel each, on the same 0–1 scale.",
     "overlap_buckets": ("Claims split into three equal groups by how many of their words appear in the correct "
                         "paper. Every system does worse when fewer words are shared; word matching suffers most."),
-    "per_query_delta": ("One thin bar per claim. Green: the AI embeddings did better; blue: TF-IDF did better; "
-                        "flat: a tie. They win on different claims, which is why combining them works."),
+    "per_query_delta": ("One thin bar per claim. Green: semantic search did better; blue: TF-IDF did better; "
+                        "flat: a tie. They win on different claims."),
 }
 PLAIN_NAMES = {
-    "tfidf": "Word matching · TF-IDF (ours)",
-    "dense-minilm": "Meaning matching · MiniLM",
-    "dense-bge": "Meaning matching · bge-small",
-    "hybrid-rrf": "Combined · words + meaning",
-    "tfidf-ce": "Cross-encoder reranker",
-    "tfidf-llm-zs": "LLM, prompted only",
-    "tfidf-llm": "LLM reranker, fine-tuned",
+    "tfidf": "Word matching · TF-IDF + cosine (ours)",
+    "dense-bge": "Meaning matching · semantic search (bge-small)",
+    "tfidf-llm": "LLM reranker (Qwen3)",
 }
 
 

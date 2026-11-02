@@ -1,13 +1,12 @@
 # Presentation demo: script and checklist
 
-The demo is a small website that runs on this laptop. One scientific claim goes to four search engines at
+The demo is a small website that runs on this laptop. One scientific claim goes to three search engines at
 once, and the page shows which one finds the correct paper:
 
 | Column | What it is |
 |---|---|
-| **Word matching · TF-IDF** | The classical system, built from scratch: TF-IDF weights + cosine similarity |
-| **Meaning matching · AI embeddings** | bge-small, a transformer that turns each text into a "meaning vector" |
-| **Combined · words + meaning** | The two lists above merged (Reciprocal Rank Fusion) |
+| **Word matching · TF-IDF + cosine** | The classical system, built from scratch: TF-IDF weights + cosine similarity |
+| **Meaning matching · semantic search** | bge-small, a transformer that turns each text into a "meaning vector" |
 | **LLM reranker · Qwen3** | A large language model reads the claim with each of TF-IDF's top 100 papers and answers yes/no |
 
 ```sh
@@ -16,9 +15,9 @@ uv run irsys demo
 
 It loads in about 30–40 s, then opens your default browser at **http://127.0.0.1:7860**. To present
 from Brave, paste that address into Brave. Stop the demo with `Ctrl+C` in the terminal. Without a GPU, use
-`uv run irsys demo --no-llm` (three columns, no tab 3).
+`uv run irsys demo --no-llm` (two columns, no tab 3).
 
-**How the page behaves:** the first three columns appear instantly. The LLM column says *"The LLM is reading
+**How the page behaves:** the first two columns appear instantly. The LLM column says *"The LLM is reading
 the 100 candidate papers…"* and fills in about 5 seconds later. That wait is part of the story: the LLM is
 the most accurate system and by far the slowest.
 
@@ -34,8 +33,8 @@ the most accurate system and by far the slowest.
 **10 minutes before**
 - [ ] Close other GPU-heavy apps; they take the GPU memory the LLM needs.
 - [ ] Plug in the charger. On battery, the GPU may throttle.
-- [ ] Run `uv run irsys demo`. Wait until example ① shows all four columns.
-- [ ] Zoom the browser to **125–150 %** (`Ctrl` + `+`) so the back row can read it. The four columns stay
+- [ ] Run `uv run irsys demo`. Wait until example ① shows all three columns.
+- [ ] Zoom the browser to **125–150 %** (`Ctrl` + `+`) so the back row can read it. The three columns stay
       side by side; if the screen is narrow they wrap onto a second row, which also works.
 - [ ] Leave it on **tab 1** with example ① loaded.
 
@@ -50,7 +49,7 @@ The talk follows the slides in `presentation/slides.pdf` (kept out of git):
 | Slides 1–5 | Presenter 1 | The task, the classical TF-IDF system, the NLP steps, how the systems are judged; then the handover |
 | Slides 6–7 | Presenter 2 | The AI side and how the LLM scores |
 | Slide 8 | Presenter 2 | **This demo**, steps 0–3 below (about 3 minutes) |
-| Slides 9–13 | Presenter 2 | Results, all six metrics, error analysis, prompting vs. fine-tuning, conclusions |
+| Slides 9–12 | Presenter 2 | Results, all six metrics, error analysis, conclusions |
 
 The slides already introduce the task and present the results, so inside the talk the demo runs steps 0–3 and
 skips steps 4–5. Use steps 4–5 only when demoing without the slides.
@@ -58,16 +57,16 @@ skips steps 4–5. Use steps 4–5 only when demoing without the slides.
 ## Script
 
 ### 0 · Set the scene (15 s; 30 s without slides)
-> "Let's see the four systems on real claims. I type a claim, and four search engines look for the paper
-> that supports or refutes it. On the left, our **classical** system: it matches **words**, and rare words
-> count more. Next, an AI model that matches **meaning**. Then the two combined. On the right, a **large
-> language model** that reads each candidate paper and answers yes or no. For these example claims we know
+> "Let's see the three systems on real claims. I type a claim, and three search engines look for the paper
+> that supports or refutes it. On the left, our **classical** system: TF-IDF with cosine similarity, it
+> matches **words**, and rare words count more. In the middle, **semantic search**: an AI model that matches
+> **meaning**. On the right, a **large language model** that reads each candidate paper and answers yes or no. For these example claims we know
 > the correct paper, so the page marks it with a green ✓."
 
 ### 1 · Example ① "Bcl2 vs BCL-2 (spelling)" (already loaded) (2 min)
 **Tab 1 · Compare**
-- Word matching: **▼ correct paper only at position 32**. Meaning matching: **✓ position 1**. Combined:
-  **position 7**. Then the LLM column fills in: **✓ position 1**.
+- Word matching: **▼ correct paper only at position 32**. Meaning matching: **✓ position 1**. Then the LLM
+  column fills in: **✓ position 1**.
 > "The claim writes 'Bcl2'. The correct paper writes 'BCL-2', with a hyphen. To word matching those are
 > different words. The AI models know they are the same gene."
 
@@ -90,8 +89,7 @@ skips steps 4–5. Use steps 4–5 only when demoing without the slides.
 
 ### 2 · Example ③ "Rare disease name" (1 min)
 **Tab 1**
-- Word matching: **✓ position 1**. Meaning matching: **▼ only at position 59**. Combined: **position 3**.
-  LLM: **✓ position 1**.
+- Word matching: **✓ position 1**. Meaning matching: **▼ only at position 59**. LLM: **✓ position 1**.
 
 **Tab 2**
 - **1e:** *ivermectin* is faded: it appears in **no** paper at all.
@@ -124,15 +122,13 @@ correct paper is always first, 0.5 ≈ usually third, 0 = not in the top 10.
 | | nDCG@10 | MAP | MRR | Time per claim |
 |---|---|---|---|---|
 | Word matching · TF-IDF (from scratch) | 0.659 | 0.609 | 0.623 | **0.17 ms** on the CPU |
-| Meaning matching · bge-small | 0.713 | 0.674 | 0.687 | 12 ms on the GPU |
-| Combined (hybrid) | 0.721 | 0.674 | 0.686 | 14 ms |
-| LLM zero-shot (general Qwen3, just prompted) | 0.276 | 0.239 | 0.246 | 5.7 s |
-| **LLM reranker (Qwen3 trained for this)** | **0.772** | **0.734** | **0.743** | 5.8 s |
+| Meaning matching · semantic search (bge-small) | 0.713 | 0.674 | 0.687 | 12 ms on the GPU |
+| **LLM reranker (Qwen3)** | **0.772** | **0.734** | **0.743** | 5.8 s on the GPU |
 
 > "The LLM reranker is the best on all six metrics: 17% better than our TF-IDF on nDCG@10, and
-> significantly better than every other system. But TF-IDF is about 34,000 times faster, needs no GPU, and every score can be explained word by
-> word, as tab 2 showed. And the same small LLM, only *prompted*, does far worse than TF-IDF: it says 'yes'
-> to every single paper. Training on the task matters more than the model being an LLM."
+> significantly better than semantic search too. Semantic search is 8% better than TF-IDF. But TF-IDF is
+> about 34,000 times faster than the LLM, needs no GPU, and every score can be explained word by word, as
+> tab 2 showed."
 
 ### 5 · Close (30 s; skip when the slides follow)
 > "Classical and AI retrieval are complementary: exact words versus meaning. The best results come from
@@ -156,12 +152,11 @@ The other two examples, if there's time:
 | What does "lsc.lsc" mean? | SMART notation: **l**og tf (1 + ln tf), **s**klearn-style idf (ln(N/df) + 1), **c**osine normalization, for both papers and claim. Chosen on the *training* claims, not the test set. |
 | Is TF-IDF really from scratch? | Yes: own tokenizer, inverted index, weighting and cosine. A test checks it matches scikit-learn's TfidfVectorizer to 9 decimal places. |
 | How does the LLM give a score if it only says yes or no? | We never let it write. One forward pass gives the probability of every possible next word; we take P("yes") vs P("no"). Tab 3 shows the exact prompt. |
-| Why is the zero-shot LLM so bad? | It answers "yes" to 100% of the 29,889 candidate papers, so its ranking is close to random. The same model fine-tuned for relevance says "yes" to only 2.3% of candidates but to 75% of the correct ones. A 0.6B model can't follow "answer yes or no" discriminatively from the prompt alone; training on the task fixes that. |
-| Why does the LLM still miss some? | It fails on 31 claims; on 20 of them TF-IDF never put the correct paper in its top 100, so the LLM never saw it. A better first stage (the hybrid) would fix many of these. |
+| How often does the LLM say "yes"? | To only 2.3% of the 29,889 candidate papers it judged, but to 75% of the correct ones: it says yes rarely, and mostly to the right papers. |
+| Why does the LLM still miss some? | It fails on 31 claims; on 20 of them TF-IDF never put the correct paper in its top 100, so the LLM never saw it. A better first stage would help: semantic search has 13 of those 20 papers in its own top 100. |
 | Why not a bigger LLM? | The laptop GPU has 4 GB. A 0.6B model already takes ~5 s per claim to read 100 papers; a 7B model would not fit, and an API model would cost money per query. |
 | Which metrics did you use? | Six: nDCG@k, MAP, MRR, Precision@k, Recall@k and F1@k, at k = 5 and 10. nDCG@10 is the main one (the BEIR standard); the others rank the systems in almost the same order. Precision and F1 are low for everyone because most claims have only one correct paper (P@10 can be at most 0.1). |
-| How does the hybrid merge two lists? | Reciprocal Rank Fusion: score = Σ 1/(60 + position). It combines **positions**, not scores, so the two systems' different score scales never need matching. |
-| Is the improvement significant? | Yes. A statistical test on the same 300 claims (Wilcoxon) gives p ≈ 5×10⁻¹¹ for the LLM reranker, far below 0.05, so it is not luck. bge and the hybrid are also really better than TF-IDF; MiniLM and the cross-encoder are not. (Details, including the correction for running several tests, are in the report.) |
+| Is the improvement significant? | Yes. A statistical test on the same 300 claims (Wilcoxon) gives p ≈ 2×10⁻¹¹ for the LLM reranker and p ≈ 0.003 for semantic search, both far below 0.05, so neither gain is luck. (Details, including the Holm correction for running two tests, are in the report.) |
 | Does it need a GPU? | Only the AI side. TF-IDF runs in a fraction of a millisecond on the CPU. `irsys demo --no-llm` runs without the LLM. |
 
 ---

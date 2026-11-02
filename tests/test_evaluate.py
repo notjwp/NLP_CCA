@@ -62,13 +62,13 @@ def test_result_files_are_utf8_for_non_ascii_system_names(tmp_path):
 
     per_query = {
         "tfidf": pd.DataFrame({m: [0.5, 1.0] for m in METRICS}, index=["q1", "q2"]),
-        "tfidf-ce": pd.DataFrame({m: [1.0, 1.0] for m in METRICS}, index=["q1", "q2"]),
+        "tfidf-llm": pd.DataFrame({m: [1.0, 1.0] for m in METRICS}, index=["q1", "q2"]),
     }
-    names = {"tfidf": "TF-IDF", "tfidf-ce": "TF-IDF → cross-encoder"}
+    names = {"tfidf": "TF-IDF", "tfidf-llm": "TF-IDF → LLM reranker"}
     _write_metrics(per_query, names, tmp_path)
     _write_significance(per_query, names, tmp_path)
-    assert "TF-IDF → cross-encoder" in (tmp_path / "metrics.md").read_text(encoding="utf-8")
-    assert "TF-IDF → cross-encoder" in (tmp_path / "significance.md").read_text(encoding="utf-8")
+    assert "TF-IDF → LLM reranker" in (tmp_path / "metrics.md").read_text(encoding="utf-8")
+    assert "TF-IDF → LLM reranker" in (tmp_path / "significance.md").read_text(encoding="utf-8")
 
 
 def test_metric_files_hold_exactly_the_six_metrics(tmp_path):

@@ -1,4 +1,5 @@
-"""End-to-end experiment: TF-IDF ablation on train, then all systems on the SciFact test split."""
+"""End-to-end experiment: TF-IDF ablation on train, then TF-IDF vs. semantic search vs. an LLM reranker on the
+SciFact test split."""
 
 import gc
 import json
@@ -16,20 +17,16 @@ from tqdm import tqdm
 from irsys.base import Retriever, Run
 from irsys.data import RESULTS_DIR, doc_text, load_scifact
 from irsys.dense import DenseRetriever
-from irsys.fusion import RRFHybrid
 from irsys.llm import INSTRUCTION, LLMReranker
 from irsys.metrics import METRICS, evaluate_run
 from irsys.preprocess import Analyzer
-from irsys.rerank import CrossEncoderReranker, RerankRetriever
+from irsys.rerank import RerankRetriever
 from irsys.stats import paired_tests
 from irsys.tfidf import SklearnTfidfRetriever, TfidfRetriever
 
-MINILM = "sentence-transformers/all-MiniLM-L6-v2"
-BGE = "BAAI/bge-small-en-v1.5"
+BGE = "BAAI/bge-small-en-v1.5"  # semantic search: embeddings trained for retrieval
 BGE_QUERY_PROMPT = "Represent this sentence for searching relevant passages: "
-CROSS_ENCODER = "cross-encoder/ms-marco-MiniLM-L-6-v2"
-LLM_ZERO_SHOT = "Qwen/Qwen3-0.6B"  # general chat LLM, prompted only
-LLM_RERANKER = "Qwen/Qwen3-Reranker-0.6B"  # same LLM, fine-tuned for relevance judgements
+LLM_RERANKER = "Qwen/Qwen3-Reranker-0.6B"  # LLM fine-tuned for relevance judgements
 RUN_DEPTH = 100  # docs kept per query; also the reranking depth
 SIGNIFICANCE_METRIC = "nDCG@10"  # the main metric; the only one tested for significance
 
@@ -138,28 +135,21 @@ def evaluate(results_dir: Path = RESULTS_DIR) -> None:
     tfidf = best.build().index(doc_ids, texts)
     tfidf_seconds = time.perf_counter() - start
     tfidf.name = f"TF-IDF cosine ({best.scheme})"
-    _log(f"Encoding corpus with {MINILM}")
-    minilm = DenseRetriever(MINILM, name="Dense: all-MiniLM-L6-v2").index(doc_ids, texts)
     _log(f"Encoding corpus with {BGE}")
-    bge = DenseRetriever(BGE, query_prompt=BGE_QUERY_PROMPT, name="Dense: bge-small-en-v1.5").index(doc_ids, texts)
+    bge = DenseRetriever(BGE, query_prompt=BGE_QUERY_PROMPT, name="Semantic search: bge-small-en-v1.5").index(
+        doc_ids, texts)
     doc_texts = dict(zip(doc_ids, texts))
 
-    def reranked(reranker_factory, name: str) -> Callable[[], Retriever]:
-        return lambda: RerankRetriever(tfidf, reranker_factory(), doc_texts, depth=RUN_DEPTH, name=name)
-
+    # Classical retrieval vs. semantic search vs. an LLM reranking TF-IDF's top 100.
     systems: dict[str, Retriever | Callable[[], Retriever]] = {
         "tfidf": tfidf,
-        "dense-minilm": minilm,
         "dense-bge": bge,
-        "hybrid-rrf": RRFHybrid([tfidf, bge], name="Hybrid: TF-IDF + bge (RRF)"),
-        "tfidf-ce": reranked(lambda: CrossEncoderReranker(CROSS_ENCODER), "TF-IDF → cross-encoder"),
-        "tfidf-llm-zs": reranked(lambda: LLMReranker(LLM_ZERO_SHOT), "TF-IDF → LLM zero-shot (Qwen3-0.6B)"),
-        "tfidf-llm": reranked(lambda: LLMReranker(LLM_RERANKER), "TF-IDF → LLM reranker (Qwen3-Reranker-0.6B)"),
+        "tfidf-llm": lambda: RerankRetriever(tfidf, LLMReranker(LLM_RERANKER), doc_texts, depth=RUN_DEPTH,
+                                             name="TF-IDF → LLM reranker (Qwen3-Reranker-0.6B)"),
     }
-    device = str(minilm.model.device)
+    device = str(bge.model.device)
 
-    # 3. Retrieve + evaluate on test. Rerankers are loaded one at a time and freed after their run,
-    # so the two LLMs never share the 4 GB GPU.
+    # 3. Retrieve + evaluate on test. The LLM is loaded only when its turn comes and freed after its run.
     per_query: dict[str, pd.DataFrame] = {}
     latencies: dict[str, list[float]] = {}
     names: dict[str, str] = {}
@@ -178,8 +168,7 @@ def evaluate(results_dir: Path = RESULTS_DIR) -> None:
 
     _write_metrics(per_query, names, results_dir)
     _write_significance(per_query, names, results_dir)
-    build_seconds = {"tfidf": tfidf_seconds, "dense-minilm": minilm.index_seconds, "dense-bge": bge.index_seconds,
-                     "hybrid-rrf": tfidf_seconds + bge.index_seconds}  # rerankers build only the TF-IDF index
+    build_seconds = {"tfidf": tfidf_seconds, "dense-bge": bge.index_seconds}  # the reranker needs only TF-IDF's index
     _write_efficiency(results_dir, [{
         "System": names[key],
         "Index build (s)": build_seconds.get(key, tfidf_seconds),
@@ -192,10 +181,9 @@ def evaluate(results_dir: Path = RESULTS_DIR) -> None:
         "n_test_queries": len(test_queries),
         "n_train_queries": len(train_queries),
         "tfidf": {"label": best.label, "scheme": best.scheme, **best.analyzer().config()},
-        "models": {"minilm": MINILM, "bge": BGE, "bge_query_prompt": BGE_QUERY_PROMPT, "cross_encoder": CROSS_ENCODER,
-                   "llm_zero_shot": LLM_ZERO_SHOT, "llm_reranker": LLM_RERANKER, "llm_instruction": INSTRUCTION},
+        "models": {"bge": BGE, "bge_query_prompt": BGE_QUERY_PROMPT, "llm_reranker": LLM_RERANKER,
+                   "llm_instruction": INSTRUCTION},
         "run_depth": RUN_DEPTH,
-        "rrf_k": 60,
         "systems": names,
         "device": device,
         "gpu": torch.cuda.get_device_name(0) if torch.cuda.is_available() else None,
@@ -250,7 +238,7 @@ def _write_significance(per_query: dict[str, pd.DataFrame], names: dict[str, str
 def _write_efficiency(results_dir: Path, rows: list[dict]) -> None:
     (results_dir / "efficiency.md").write_text(
         "Index build = TF-IDF indexing or corpus embedding time. Time per claim = one query at a time, "
-        f"top-{RUN_DEPTH}, after a warm-up query; hybrid and rerankers include their first stage.\n\n"
+        f"top-{RUN_DEPTH}, after a warm-up query; the LLM reranker includes its TF-IDF first stage.\n\n"
         + _md(pd.DataFrame(rows), floatfmt=".2f"),
         encoding="utf-8",
     )
@@ -286,7 +274,8 @@ def rescore(results_dir: Path = RESULTS_DIR, qrels: dict[str, dict[str, int]] | 
     _write_metrics(per_query, names, results_dir)
     _write_significance(per_query, names, results_dir)
 
-    timings = read_markdown_table((results_dir / "efficiency.md").read_text(encoding="utf-8"))
+    timings = [row for row in read_markdown_table((results_dir / "efficiency.md").read_text(encoding="utf-8"))
+               if row["System"] in names.values()]
     _write_efficiency(results_dir, [{
         "System": row["System"],
         "Index build (s)": float(row["Index build (s)"]),

@@ -12,7 +12,7 @@ class _FirstStage(Retriever):
 
 
 class _LengthScorer:
-    """Stand-in for a cross-encoder: longer text = more relevant."""
+    """Stand-in for the LLM reranker: longer text = more relevant."""
 
     def __init__(self):
         self.calls = []

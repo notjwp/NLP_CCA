@@ -130,24 +130,24 @@ def test_results_tables_show_the_six_metrics_then_speed_and_significance(tmp_pat
     from irsys.demo import results_tables
     from irsys.metrics import METRICS
 
-    names = {"tfidf": "TF-IDF cosine", "dense-bge": "Dense: bge", "tfidf-llm-zs": "LLM zero-shot"}
-    grades = {"tfidf": 0.5, "dense-bge": 0.7, "tfidf-llm-zs": 0.1}
+    names = {"tfidf": "TF-IDF cosine", "dense-bge": "Semantic: bge", "tfidf-llm": "LLM reranker"}
+    grades = {"tfidf": 0.5, "dense-bge": 0.7, "tfidf-llm": 0.1}
     pd.DataFrame([{"system": s, "name": n, **{m: grades[s] for m in METRICS}} for s, n in names.items()]
                  ).to_csv(tmp_path / "metrics.csv", index=False)
     (tmp_path / "efficiency.md").write_text(
         "Note.\n\n" + pd.DataFrame({"System": list(names.values()), "Mean time per claim (ms)": [0.17, 12.46, 5728.7]})
         .to_markdown(index=False), encoding="utf-8")
-    scores = {"tfidf": [0.5] * 30, "dense-bge": [1.0] * 25 + [0.5] * 5, "tfidf-llm-zs": [0.0] * 25 + [0.5] * 5}
+    scores = {"tfidf": [0.5] * 30, "dense-bge": [1.0] * 25 + [0.5] * 5, "tfidf-llm": [0.0] * 25 + [0.5] * 5}
     pd.DataFrame([{"system": s, "qid": str(i), "nDCG@10": v} for s, vs in scores.items() for i, v in enumerate(vs)]
                  ).to_csv(tmp_path / "per_query.csv", index=False)
 
     tables = results_tables(tmp_path)
     assert "| System | " + " | ".join(METRICS) + " |" in tables
-    assert "| Word matching · TF-IDF (ours) | " + " | ".join(["0.500"] * len(METRICS)) + " |" in tables
+    assert "| Word matching · TF-IDF + cosine (ours) | " + " | ".join(["0.500"] * len(METRICS)) + " |" in tables
     assert "| System | Time per claim | Really better than TF-IDF? |" in tables
-    assert "| Word matching · TF-IDF (ours) | 0.17 ms | — (baseline) |" in tables
-    assert "| Meaning matching · bge-small | 12.5 ms | yes |" in tables
-    assert "| LLM, prompted only | 5.7 s | no, worse |" in tables
+    assert "| Word matching · TF-IDF + cosine (ours) | 0.17 ms | — (baseline) |" in tables
+    assert "| Meaning matching · semantic search (bge-small) | 12.5 ms | yes |" in tables
+    assert "| LLM reranker (Qwen3) | 5.7 s | no, worse |" in tables
 
 
 def test_slow_answers_are_shown_in_seconds():
