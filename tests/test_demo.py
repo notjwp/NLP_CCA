@@ -239,3 +239,102 @@ def test_explanation_shows_parts_of_speech_and_noun_phrases(engine):
     html = render_explanation(engine, QUERIES["q1"])  # "Low vitamin D causes fractures"
     assert "adjective" in html and "noun" in html and "verb" in html
     assert "low vitamin d" in html  # noun-phrase chunk from the parser
+
+
+# ---------------------------------------------------------------- presenter-friendly layout
+
+
+def test_one_big_tile_per_engine_says_where_the_correct_paper_landed(engine):
+    html = render_results(engine.compare(QUERIES["q1"], k=2), ANALYZER, QUERIES["q1"])
+    assert html.count('class="tile ') == 2
+    assert ">#1<" in html and ">#3<" in html  # TF-IDF first, the fake semantic system third
+
+
+def test_tiles_and_lists_render_separately_so_the_why_buttons_fit_between(engine):
+    from irsys.demo import render_lists, render_tiles
+
+    results = engine.compare(QUERIES["q1"], k=2)
+    tiles, lists = render_tiles(results), render_lists(results, ANALYZER, QUERIES["q1"])
+    assert 'class="tile ' in tiles and 'class="col' not in tiles
+    assert 'class="col' in lists and 'class="tile ' not in lists
+
+
+def test_pending_engine_gets_a_waiting_tile(engine):
+    html = render_results(engine.compare(QUERIES["q1"], k=2), ANALYZER, QUERIES["q1"], pending=["LLM reranker"])
+    assert html.count('class="tile ') == 3 and 'class="tile pending"' in html
+
+
+def test_own_claims_have_no_answer_key_tile(engine):
+    html = render_results(engine.compare("sleep and memory", k=2), ANALYZER, "sleep and memory")
+    assert "no answer key" in html and "✓" not in html
+
+
+def test_result_lists_keep_titles_and_put_the_abstract_in_a_tooltip(engine):
+    html = render_results(engine.compare(QUERIES["q1"], k=1), ANALYZER, QUERIES["q1"])
+    assert 'title="Vitamin D deficiency is linked to bone fractures."' in html
+
+
+def test_story_card_explains_the_example_in_one_sentence(engine):
+    from irsys.demo import render_story
+
+    stories = {"q1": ("A made-up story", "TF-IDF wins because of <b>vitamin</b>.")}
+    preset = render_story(engine, QUERIES["q1"], stories)
+    assert "A made-up story" in preset and "<b>vitamin</b>" in preset
+    assert "known answer" in render_story(engine, QUERIES["q2"], stories)  # a test claim without a story
+    assert "Your own claim" in render_story(engine, "sleep and memory", stories)
+    assert render_story(engine, "   ", stories) == ""
+
+
+def test_every_preset_has_a_story():
+    from irsys.demo import PRESETS, STORIES
+
+    assert {qid for _, qid in PRESETS} == set(STORIES)
+
+
+def test_tfidf_takeaway_when_the_top_hit_is_correct(engine):
+    from irsys.demo import tfidf_takeaway
+
+    text = tfidf_takeaway(engine, QUERIES["q1"])
+    assert "is the correct paper" in text and "most important word" in text
+
+
+def test_tfidf_takeaway_names_the_word_that_decided_it(engine):
+    from irsys.demo import tfidf_takeaway
+
+    text = tfidf_takeaway(engine, QUERIES["q2"])  # TF-IDF's #1 is the BRCA paper; the correct one is 2nd
+    assert "TF-IDF's #1" in text and "position 2" in text
+    assert "“brca”" in text or "“gene”" in text or "“mutat”" in text  # a word only the #1 paper shares
+
+
+def test_tfidf_explanation_starts_step_3_with_the_takeaway(engine):
+    html = render_explanation(engine, QUERIES["q2"])
+    assert 'class="takeaway"' in html and html.index('class="takeaway"') < html.index('class="doc"')
+
+
+def test_llm_explanation_says_how_far_the_correct_paper_moved(llm_engine):
+    html = render_llm_explanation(llm_engine, QUERIES["q2"])
+    assert "moves from position 2 to 1" in html
+    assert "<details" in html  # the long prompt is folded away until the presenter opens it
+
+
+def test_results_headline_shows_one_tile_per_system(tmp_path):
+    import pandas as pd
+
+    from irsys.demo import results_headline
+    from irsys.metrics import METRICS
+
+    names = {"tfidf": "TF-IDF cosine", "dense-bge": "Semantic: bge"}
+    grades = {"tfidf": 0.5, "dense-bge": 0.7}
+    pd.DataFrame([{"system": s, "name": n, **{m: grades[s] for m in METRICS}} for s, n in names.items()]
+                 ).to_csv(tmp_path / "metrics.csv", index=False)
+    (tmp_path / "efficiency.md").write_text(
+        "Note.\n\n" + pd.DataFrame({"System": list(names.values()), "Mean time per claim (ms)": [0.17, 12.46]})
+        .to_markdown(index=False), encoding="utf-8")
+    pd.DataFrame([{"system": s, "qid": str(i), "nDCG@10": v} for s, vs in
+                  {"tfidf": [0.5] * 30, "dense-bge": [1.0] * 25 + [0.5] * 5}.items() for i, v in enumerate(vs)]
+                 ).to_csv(tmp_path / "per_query.csv", index=False)
+
+    html = results_headline(tmp_path)
+    assert html.count('class="tile ') == 2
+    assert "0.500" in html and "0.700" in html and "0.17 ms" in html and "12.5 ms" in html
+    assert "Semantic search" in html

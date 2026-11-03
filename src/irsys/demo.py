@@ -1,7 +1,11 @@
-"""Presentation demo: live TF-IDF vs. semantic comparison and a step-by-step TF-IDF explanation.
+"""Presentation demo: live TF-IDF vs. semantic search vs. LLM comparison, and step-by-step explanations.
 
 ``uv run irsys demo`` opens it in the browser. The engine and HTML renderers are plain
 functions (tested in tests/test_demo.py); ``build_app`` only wires them into Gradio.
+
+The layout follows the order of the talk: a one-sentence story for the example, one big tile per engine
+saying where it put the correct paper, the three result lists, then "why?" buttons that jump to the
+explanation tabs.
 """
 
 import html
@@ -26,6 +30,25 @@ PRESETS = [
     ("③ Rare disease name", "660"),
     ("④ LDL vs HDL", "674"),
 ]
+# One headline and one or two sentences per preset: what the example shows, in plain words.
+STORIES = {
+    "1088": ("Same gene, different spelling",
+             "The claim writes <b>Bcl2</b>; the correct paper writes <b>BCL-2</b>. Word matching splits “BCL-2” "
+             "into “bcl” + “2”, so the claim's most important word never matches. The AI models know both "
+             "spellings mean the same gene."),
+    "1278": ("Same idea, different words",
+             "The correct paper (“Is autoimmunity the Achilles' heel of cancer immunotherapy?”) says what the claim "
+             "says, in other words. Word matching has little to hold on to; meaning matching and the LLM recognise "
+             "the idea."),
+    "660": ("A rare word is a perfect fingerprint",
+            "<b>Onchocerciasis</b> appears in just one of the 5,183 papers, so TF-IDF gives it the highest possible "
+            "weight and ranks that paper first. The embedding model has only a vague idea of this disease; the LLM "
+            "reads the paper and agrees with TF-IDF."),
+    "674": ("One letter matters: LDL vs. HDL",
+            "The claim is about <b>LDL</b> cholesterol. Word matching keeps the exact term; the embedding model "
+            "blurs LDL and HDL and puts a paper about <b>HDL</b> cholesterol first. The LLM reads the paper and keeps "
+            "the right one first."),
+}
 TFIDF_NAME = "Word matching · TF-IDF + cosine"
 SEMANTIC_NAME = "Meaning matching · semantic search"
 LLM_NAME = "LLM reranker · Qwen3"
@@ -34,7 +57,7 @@ DESCRIPTIONS = {
     SEMANTIC_NAME: "A neural language model (bge-small) turns each text into a “meaning vector” and compares those.",
     LLM_NAME: "A large language model reads the claim with each of TF-IDF's top 100 papers and answers yes or no.",
 }
-SYSTEM_COLORS = ["#2a78d6", "#1baf7a", "#6250d6"]  # same colors as the report figures
+SYSTEM_COLORS = ["#2a78d6", "#1baf7a", "#6250d6"]  # same colors as the report figures and the slides
 _WORD_RE = re.compile(r"[A-Za-z0-9]+")
 
 
@@ -169,48 +192,107 @@ def _snippet(text: str, limit: int = 230) -> str:
     return text if len(text) <= limit else text[:limit].rsplit(" ", 1)[0] + " …"
 
 
-def render_results(results: list[SystemResult], analyzer: Analyzer, query: str,
-                   pending: list[str] | None = None) -> str:
-    """One column per system; ``pending`` systems get a placeholder column while they are still running."""
+def _dot(color: str) -> str:
+    return f'<i style="--c:{color}"></i>'
+
+
+def render_story(engine: DemoEngine, text: str, stories: dict[str, tuple[str, str]] | None = None) -> str:
+    """One card above the tabs: what this example shows, in one or two sentences."""
+    text = (text or "").strip()
+    if not text:
+        return ""
+    stories = STORIES if stories is None else stories
+    qid = engine.lookup(text)
+    if qid in stories:
+        kicker, (head, body) = "What this example shows", stories[qid]
+    elif qid:
+        kicker, head = "A test claim", "A test claim with a known answer"
+        body = ("The benchmark says which paper supports or refutes this claim. It is marked ✓ below: watch where "
+                "each engine puts it.")
+    else:
+        kicker, head = "Typed claim", "Your own claim"
+        body = ("There is no answer key for a typed claim, so compare the lists by eye. Words in yellow also appear "
+                "in the claim.")
+    return (f'<div class="irsys"><div class="story"><div class="kicker">💡 {kicker}</div>'
+            f'<div class="story-head">{head}</div><p>{body}</p></div></div>')
+
+
+def _tile(color: str, res: SystemResult) -> str:
+    """One big tile per engine: where it put the correct paper, and how long it took."""
+    r = res.correct_rank
+    if not res.judged:
+        cls, big, status = "muted", "—", "no answer key for your own claim"
+    elif r and r <= len(res.hits):
+        cls, big, status = "good", f"#{r}", f"✓ found the correct paper at position {r}"
+    elif r:
+        cls, big, status = "warn", f"#{r}", f"▼ correct paper only at position {r}"
+    else:
+        cls, big, status = "bad", "✗", "✗ correct paper not in its top 100"
+    caption = '<div class="cap">position of the correct paper</div>' if res.judged else ""
+    return (f'<div class="tile {cls}" style="--c:{color}"><div class="name">{_dot(color)}{html.escape(res.name)}</div>'
+            f'<div class="big">{big}</div>{caption}<div class="status">{status}</div>'
+            f'<div class="time">answered in {_duration(res.latency_ms)}</div></div>')
+
+
+def _pending_tile(color: str, name: str) -> str:
+    return (f'<div class="tile pending" style="--c:{color}"><div class="name">{_dot(color)}{html.escape(name)}</div>'
+            '<div class="spin"></div><div class="status">reading the 100 candidate papers …</div>'
+            '<div class="time">about 5 seconds</div></div>')
+
+
+def _tiles(results: list[SystemResult], pending: list[str] | None) -> str:
+    colors = SYSTEM_COLORS * 2
+    tiles = [_tile(color, res) for color, res in zip(colors, results)]
+    tiles += [_pending_tile(color, name) for name, color in zip(pending or [], colors[len(results):])]
+    return f'<div class="tiles">{"".join(tiles)}</div>'
+
+
+def _lists(results: list[SystemResult], analyzer: Analyzer, query: str, pending: list[str] | None) -> str:
     terms = set(analyzer(query))
+    colors = SYSTEM_COLORS * 2
     columns = []
-    for color, res in zip(SYSTEM_COLORS * 2, results):
-        if not res.judged:
-            badge = ""
-        elif res.correct_rank and res.correct_rank <= len(res.hits):
-            badge = f'<div class="badge good">✓ found the correct paper at position {res.correct_rank}</div>'
-        elif res.correct_rank:
-            badge = (f'<div class="badge warn">▼ correct paper only at position {res.correct_rank} '
-                     f'(too low to show)</div>')
-        else:
-            badge = '<div class="badge bad">✗ correct paper not in its top 100</div>'
+    for color, res in zip(colors, results):
         hits = []
         for i, h in enumerate(res.hits, start=1):
             tag = '<span class="tag">✓ correct paper</span>' if h.relevant else ""
+            tooltip = html.escape(_snippet(h.text, 300), quote=True)
             hits.append(
-                f'<li class="hit{" relevant" if h.relevant else ""}"><div class="hit-head"><span class="rank">#{i}</span>'
-                f'{tag}</div>'
-                f'<div class="title">{highlight(h.title, analyzer, terms)}</div>'
-                f'<div class="snippet">{highlight(_snippet(h.text), analyzer, terms)}</div></li>'
+                f'<li class="hit{" relevant" if h.relevant else ""}" title="{tooltip}"><span class="rank">#{i}</span>'
+                f'<div>{tag}<div class="title">{highlight(h.title, analyzer, terms)}</div></div></li>'
             )
         body = "".join(hits) or '<li class="empty">No paper shares a word with the claim.</li>'
         columns.append(
-            f'<section class="col"><header style="border-top-color:{color}"><h3>{html.escape(res.name)}</h3>'
+            f'<section class="col" style="--c:{color}"><header><h4>{_dot(color)}{html.escape(res.name)}</h4>'
             + (f'<div class="blurb">{html.escape(res.description)}</div>' if res.description else "")
-            + f'<div class="meta">answered in {_duration(res.latency_ms)}</div>{badge}</header><ol>{body}</ol></section>'
+            + f"</header><ol>{body}</ol></section>"
         )
-    for name, color in zip(pending or [], (SYSTEM_COLORS * 2)[len(results):]):
+    for name, color in zip(pending or [], colors[len(results):]):
         columns.append(
-            f'<section class="col pending"><header style="border-top-color:{color}"><h3>{html.escape(name)}</h3>'
-            '<div class="meta">The LLM is reading the 100 candidate papers one by one … (about 5 seconds)</div>'
-            "</header></section>"
+            f'<section class="col pending" style="--c:{color}"><header><h4>{_dot(color)}{html.escape(name)}</h4>'
+            '<div class="blurb">The LLM is reading the 100 candidate papers one by one …</div></header></section>'
         )
-    note = ("This claim is from the test set, so we know which paper is correct: it is marked ✓ and shaded green."
-            if results and results[0].judged
-            else "Your own claim: nobody has marked a correct paper, so compare the lists by eye.")
-    legend = (f'<p class="note">{note} <mark>Yellow</mark> words also appear in the claim (after cutting words to '
-              "their root, so <i>tumors</i> matches <i>tumor</i>). Each column shows its top 5.</p>")
-    return f'<div class="irsys">{legend}<div class="grid">{"".join(columns)}</div></div>'
+    shown = max((len(r.hits) for r in results), default=5) or 5
+    legend = (f'<p class="note">Each list shows the engine\'s top {shown}; hover over a title to read the start of '
+              "the paper. <mark>Yellow</mark> words also appear in the claim (after cutting words to their root, "
+              "so <i>tumors</i> matches <i>tumor</i>).</p>")
+    return f'{legend}<div class="grid">{"".join(columns)}</div>'
+
+
+def render_tiles(results: list[SystemResult], pending: list[str] | None = None) -> str:
+    """One big tile per engine: where it put the correct paper (``pending`` engines get a waiting tile)."""
+    return f'<div class="irsys">{_tiles(results, pending)}</div>'
+
+
+def render_lists(results: list[SystemResult], analyzer: Analyzer, query: str,
+                 pending: list[str] | None = None) -> str:
+    """One result list per engine (``pending`` engines get an empty column while they are still running)."""
+    return f'<div class="irsys">{_lists(results, analyzer, query, pending)}</div>'
+
+
+def render_results(results: list[SystemResult], analyzer: Analyzer, query: str,
+                   pending: list[str] | None = None) -> str:
+    """The tiles, then the lists: the whole of tab 1 in one piece of HTML."""
+    return f'<div class="irsys">{_tiles(results, pending)}{_lists(results, analyzer, query, pending)}</div>'
 
 
 def scheme_formula(scheme: str) -> str:
@@ -264,12 +346,51 @@ def _contribution_table(table: pd.DataFrame, scale: float) -> str:
         width = 0 if absent or scale <= 0 else 100 * contribution / scale
         rows.append(
             f'<tr class="{"absent" if absent else ""}"><td class="term">{html.escape(term)}</td>'
-            f"<td>{w_q:.3f}</td><td>{'not in this paper' if absent else f'{w_d:.3f}'}</td>"
+            f"<td>{w_q:.3f}</td><td>{'✗ missing' if absent else f'{w_d:.3f}'}</td>"
             f'<td>{contribution:.4f}</td><td class="barcell"><div class="bar" style="width:{width:.1f}%"></div></td></tr>'
         )
-    return ('<table class="tbl"><tr><th>word root</th><th>weight in claim (w<sub>q</sub>)</th>'
-            '<th>weight in paper (w<sub>d</sub>)</th><th>w<sub>q</sub> × w<sub>d</sub></th><th></th></tr>'
+    return ('<table class="tbl"><tr><th>word root</th><th>in claim (w<sub>q</sub>)</th>'
+            '<th>in paper (w<sub>d</sub>)</th><th>w<sub>q</sub> × w<sub>d</sub></th><th></th></tr>'
             + "".join(rows) + "</table>")
+
+
+def _present(engine: DemoEngine, query: str, doc_id: str) -> set[str]:
+    table, _, _ = engine.contributions(query, doc_id)
+    return set(table.loc[table["doc weight"] > 0, "term"])
+
+
+def tfidf_takeaway(engine: DemoEngine, query: str) -> str:
+    """One sentence on why TF-IDF ranked the papers as it did, naming the word that decided it."""
+    terms = engine.term_table(query)
+    top = engine.tfidf.search(query, 1)
+    if terms.empty or not top:
+        return ""
+    ordered = terms.sort_values("query weight", ascending=False, kind="stable")
+    key = ordered.iloc[0]
+    tied = (ordered["query weight"] >= key["query weight"] - 1e-12).sum() > 1
+    importance = "one of the claim's most important words" if tied else "the claim's most important word"
+    key_text = f"“{key['term']}” (in {int(key['df']):,} of {engine.tfidf.n_docs:,} papers)"
+    top_id = top[0][0]
+    in_top = _present(engine, query, top_id)
+    relevant = engine.relevant(query)
+    if not relevant:
+        found = f", including {importance}, {key_text}" if key["term"] in in_top else ""
+        return f"TF-IDF's #1 paper contains {len(in_top)} of the claim's {len(terms)} indexed word roots{found}."
+    if top_id in relevant:
+        if key["term"] in in_top:
+            return f"TF-IDF's #1 result is the correct paper ✓. It contains {key_text}, {importance}."
+        return "TF-IDF's #1 result is the correct paper ✓: it shares the most important vocabulary with the claim."
+    correct = relevant[0]
+    _, _, rank = engine.contributions(query, correct)
+    where = (f"so the correct paper ends up at position {rank}" if rank
+             else "so TF-IDF does not find the correct paper at all")
+    in_correct = _present(engine, query, correct)
+    missing = [t for t in ordered["term"] if t in in_top and t not in in_correct]
+    if key["term"] in missing:
+        return f"{importance.capitalize()}, {key_text}, is in TF-IDF's #1 paper but not in the correct paper, {where}."
+    if missing:
+        return f"TF-IDF's #1 paper shares “{missing[0]}” with the claim and the correct paper does not, {where}."
+    return f"The correct paper shares less of the claim's important vocabulary than TF-IDF's #1, {where}."
 
 
 def render_explanation(engine: DemoEngine, query: str) -> str:
@@ -291,10 +412,11 @@ def render_explanation(engine: DemoEngine, query: str) -> str:
         f"<tr><th>1d · Drop filler words<br><small>(stopwords)</small></th><td>{_chips(stages['without_stopwords'])}</td></tr>",
         f"<tr><th>1e · Cut to word roots<br><small>({roots})</small></th>"
         f"<td>{_chips(stages['terms'], oov, 'in no paper')}</td></tr></table>",
-        '<p class="note">1b and 1c use NLTK: a trained POS tagger, then a chunk parser with the grammar '
-        "<code>NP: {&lt;JJ.*|NN.*&gt;*&lt;NN.*&gt;}</code> (adjectives and nouns ending in a noun). We tested "
-        "using them to index dictionary forms (lemmas) and noun phrases; on the 809 training claims plain stemming "
-        "worked best, so the final system indexes word roots only (report §4.1).</p>",
+        '<details class="aside"><summary>How do 1b and 1c work?</summary><p>NLTK labels every word with its part of '
+        "speech, then a chunk parser with the grammar <code>NP: {&lt;JJ.*|NN.*&gt;*&lt;NN.*&gt;}</code> (adjectives "
+        "and nouns ending in a noun) finds noun phrases. We tested indexing dictionary forms (lemmas) and noun "
+        "phrases; on the 809 training claims plain stemming worked best, so the final system indexes word roots "
+        "only (report §4.1).</p></details>",
     ]
     if oov:
         parts.append(f'<p class="note">Faded word roots appear in <b>no</b> paper, so TF-IDF cannot use them: '
@@ -305,24 +427,24 @@ def render_explanation(engine: DemoEngine, query: str) -> str:
         parts.append("<p class=\"note\"><b>None of the claim's words appear in any paper</b>, "
                      "so TF-IDF cannot score anything.</p>")
         return '<div class="irsys">' + "".join(parts) + "</div>"
+    terms = terms.sort_values("query weight", ascending=False, kind="stable")
+    top_weight = terms["query weight"].max()
     rows = "".join(
         f'<tr><td class="term">{html.escape(term)}</td><td>{qtf}</td><td>{df:,}</td>'
-        f"<td>{idf:.3f}</td><td>{w_q:.3f}</td></tr>"
-        for term, qtf, df, idf, w_q in terms.sort_values("query weight", ascending=False).itertuples(
-            index=False, name=None)
+        f"<td>{idf:.2f}</td><td>{w_q:.3f}</td>"
+        f'<td class="barcell"><div class="bar" style="width:{100 * w_q / top_weight:.1f}%"></div></td></tr>'
+        for term, qtf, df, idf, w_q in terms.itertuples(index=False, name=None)
     )
     parts.append(
         "<h3>Step 2 · How important is each word?</h3>"
-        f'<p class="note"><b>df</b> = in how many of the {tfidf.n_docs:,} papers the word appears. The rarer the '
-        "word, the higher its <b>idf</b> (rarity score), so the more it counts. The weights are then scaled so the "
-        "claim's weights form a vector of length 1.</p>"
-        '<table class="tbl"><tr><th>word root</th><th>times in claim (tf)</th><th>papers containing it (df)</th>'
-        f"<th>rarity (idf)</th><th>weight in claim (w<sub>q</sub>)</th></tr>{rows}</table>"
+        f'<p class="note">The fewer of the {tfidf.n_docs:,} papers contain a word (<b>df</b>), the higher its rarity '
+        "score (<b>idf</b>), so the more it counts. The longest bar is the claim's most important word.</p>"
+        '<table class="tbl"><tr><th>word root</th><th>times in claim</th><th>papers containing it (df)</th>'
+        f"<th>rarity (idf)</th><th>weight in claim (w<sub>q</sub>)</th><th></th></tr>{rows}</table>"
     )
 
     # Step 3: why TF-IDF's top hit won, and (for test claims) how the correct abstract scored.
-    qid = engine.lookup(query)
-    relevant = [d for d, g in engine.qrels.get(qid, {}).items() if g > 0] if qid else []
+    relevant = engine.relevant(query)
     top = tfidf.search(query, 1)
     top_id = top[0][0] if top else None
     docs = []
@@ -332,28 +454,36 @@ def render_explanation(engine: DemoEngine, query: str) -> str:
     docs += [("Correct paper", d) for d in relevant if d != top_id]
     explained = [(label, d, *engine.contributions(query, d)) for label, d in docs]
     scale = max((t["contribution"].max() for _, _, t, _, _ in explained if not t.empty), default=0)
+    takeaway = tfidf_takeaway(engine, query)
     parts.append(
-        "<h3>Step 3 · Score = how much important vocabulary the claim and the paper share</h3>"
-        '<p class="note">For each word root: weight in the claim × weight in the paper. Adding these up gives the '
-        "<b>cosine similarity</b>, the number TF-IDF sorts the papers by. A word root missing from the paper adds 0, however "
-        "important it is.</p>"
+        "<h3>Step 3 · Which paper wins, and why?</h3>"
+        + (f'<p class="takeaway">{html.escape(takeaway, quote=False)}</p>' if takeaway else "")
+        + '<p class="note">For each word root: weight in the claim × weight in the paper. The sum is the '
+        "<b>cosine similarity</b> that TF-IDF sorts the papers by. A word missing from the paper adds 0, however "
+        "important it is.</p><div class=\"duel\">"
     )
     for label, d, table, score, rank in explained:
-        rank_text = f"TF-IDF position {rank}" if rank else "not found by TF-IDF (score 0)"
+        rank_text = f"TF-IDF position {rank}" if rank else "not found by TF-IDF"
         parts.append(
-            f'<div class="doc"><div class="doc-head"><b>{html.escape(label)}</b> · {rank_text} · '
-            f'score = <b>{score:.3f}</b></div><div class="title">{html.escape(engine.corpus[d]["title"])}</div>'
+            f'<div class="doc"><div class="doc-head"><b>{html.escape(label)}</b></div>'
+            f'<div class="title">{html.escape(engine.corpus[d]["title"])}</div>'
+            f'<div class="doc-meta">{rank_text} · cosine similarity <b>{score:.3f}</b></div>'
             f"{_contribution_table(table, scale)}</div>"
         )
     parts.append(
-        f'<p class="formula"><b>The exact formula</b> (SMART scheme <code>{html.escape(tfidf.scheme)}</code>): '
-        f"{scheme_formula(tfidf.scheme)} N = {tfidf.n_docs:,} papers.</p>"
+        "</div>"
+        f'<details class="aside"><summary>The exact formula (SMART scheme <code>{html.escape(tfidf.scheme)}</code>)'
+        f"</summary><p>{scheme_formula(tfidf.scheme)} N = {tfidf.n_docs:,} papers.</p></details>"
     )
     return '<div class="irsys">' + "".join(parts) + "</div>"
 
 
+def _p_yes(log_odds: float) -> float:
+    return 100 / (1 + math.exp(-log_odds))
+
+
 def render_llm_explanation(engine: DemoEngine, query: str, llm_result: SystemResult | None = None) -> str:
-    """The exact prompt the LLM sees and its P(yes) for the papers that matter for this claim."""
+    """How the LLM decides, its P(yes) for the papers that matter for this claim, and the exact prompt."""
     from irsys.llm import format_pair
 
     if engine.llm_name is None:
@@ -367,85 +497,165 @@ def render_llm_explanation(engine: DemoEngine, query: str, llm_result: SystemRes
     log_odds = dict(llm_result.ranking)
     llm_rank = {d: r for r, (d, _) in enumerate(llm_result.ranking, start=1)}
     tfidf_rank = {d: r for r, (d, _) in enumerate(engine.tfidf.search(query, 100), start=1)}
+    relevant = engine.relevant(query)
+    top_tfidf = llm.first_stage.search(query, 1)[0][0]
 
     labels: dict[str, list[str]] = {}
-    for label, docs in (("TF-IDF's #1", [llm.first_stage.search(query, 1)[0][0]]),
-                        ("Correct paper", engine.relevant(query)), ("LLM's #1", [llm_result.ranking[0][0]])):
+    for label, docs in (("TF-IDF's #1", [top_tfidf]), ("Correct paper", relevant),
+                        ("LLM's #1", [llm_result.ranking[0][0]])):
         for d in docs:
             labels.setdefault(d, []).append(label)
+    color = SYSTEM_COLORS[2]
     rows = []
     for d, names in labels.items():
-        p_yes = f"{100 / (1 + math.exp(-log_odds[d])):.1f}%" if d in log_odds else "not a candidate"
+        if d in log_odds:
+            p = _p_yes(log_odds[d])
+            bar = (f'<div class="pwrap"><div class="pbar"><div style="width:{p:.1f}%"></div></div>'
+                   f"<b>{p:.1f}%</b></div>")
+        else:
+            bar = '<span class="muted">not among the 100 candidates</span>'
+        moved = f"#{tfidf_rank.get(d, '>100')} → #{llm_rank.get(d, '—')}"
         rows.append(
-            f'<tr><td class="term">{html.escape(" · ".join(names), quote=False)}</td><td class="left">'
-            f'{html.escape(engine.corpus[d]["title"])}</td><td>{tfidf_rank.get(d, ">100")}</td>'
-            f"<td><b>{p_yes}</b></td><td>{llm_rank.get(d, '—')}</td></tr>"
+            f'<tr><td class="left role">{html.escape(" · ".join(names), quote=False)}</td><td class="left">'
+            f'{html.escape(engine.corpus[d]["title"])}</td><td class="left">{bar}</td><td>{moved}</td></tr>'
         )
 
-    shown = next((d for d in engine.relevant(query) if d in log_odds), llm_result.ranking[0][0])
+    correct = next((d for d in relevant if d in log_odds), None)
+    if correct:
+        tr, lr = tfidf_rank.get(correct), llm_rank[correct]
+        move = f"stays at position {lr}." if tr == lr else f"moves from position {tr} to {lr}."
+        p_correct = f"{_p_yes(log_odds[correct]):.1f}%"
+        if correct == top_tfidf:
+            takeaway = (f"The LLM says {p_correct} “yes” to the correct paper, which was already TF-IDF's #1, "
+                        f"so the correct paper {move}")
+        else:
+            takeaway = (f"The LLM says {p_correct} “yes” to the correct paper but only "
+                        f"{_p_yes(log_odds[top_tfidf]):.1f}% to TF-IDF's #1, so the correct paper {move}")
+    elif relevant:
+        takeaway = ("The correct paper is not among TF-IDF's 100 candidates, so the LLM never sees it: a reranker "
+                    "cannot fix a first-stage miss.")
+    else:
+        takeaway = (f"The LLM's #1 paper got {_p_yes(llm_result.ranking[0][1]):.1f}% “yes”. There is no answer key "
+                    "for a typed claim.")
+
+    shown = correct or llm_result.ranking[0][0]
     prefix, body, suffix = format_pair(query, _snippet(engine.corpus[shown]["text"], 300),
                                        getattr(llm.reranker, "instruction", ""))
+    flow = [("TF-IDF picks 100 candidate papers", "in a fraction of a millisecond"),
+            ("The LLM reads the claim with one paper", "and may only answer “yes” or “no”"),
+            ("Papers are sorted by P(“yes”)", "the model's probability that the next word is “yes”")]
+    steps = '<span class="arrow">→</span>'.join(
+        f'<div class="stepbox"><b class="n">{i}</b><b>{html.escape(h, quote=False)}</b><br>'
+        f"<span class=\"muted\">{html.escape(s, quote=False)}</span></div>"
+        for i, (h, s) in enumerate(flow, start=1)
+    )
     return (
-        '<div class="irsys">'
-        "<h3>How the LLM reranker works</h3>"
-        '<p class="note">TF-IDF first picks 100 candidate papers. The LLM (Qwen3-Reranker, 0.6 billion parameters) '
-        "then reads the claim together with <b>one</b> paper at a time, 100 times, and is told it may only answer "
-        "“yes” or “no”. We don't let it write anything: we read the probability it gives to “yes” as its next word, "
-        "and sort the papers by that probability.</p>"
-        f"<h3>What it said about the papers that matter here</h3>"
-        '<table class="tbl"><tr><th>role</th><th class="left">paper</th><th>TF-IDF position</th>'
-        f'<th>LLM: P(“yes”)</th><th>LLM position</th></tr>{"".join(rows)}</table>'
-        f"<h3>The exact prompt, for “{html.escape(engine.corpus[shown]['title'])}”</h3>"
+        f'<div class="irsys" style="--c:{color}">'
+        "<h3>How the LLM reranker decides</h3>"
+        f'<div class="flow">{steps}</div>'
+        f'<p class="takeaway" style="--c:{color}">{html.escape(takeaway, quote=False)}</p>'
+        "<h3>What it said about the papers that matter here</h3>"
+        '<table class="tbl pyes"><tr><th class="left">role</th><th class="left">paper</th><th class="left">P(“yes”)</th>'
+        f'<th>TF-IDF → LLM</th></tr>{"".join(rows)}</table>'
+        f'<details class="aside"><summary>Show the exact prompt the LLM reads for “'
+        f'{html.escape(engine.corpus[shown]["title"])}”</summary>'
         f'<pre class="prompt">{html.escape(prefix + body + suffix)}<b>yes / no ?</b></pre>'
         '<p class="note">The paper is shortened here for display; the model reads up to 512 tokens. The same '
-        "question is asked of all 100 candidates.</p></div>"
+        "question is asked of all 100 candidates.</p></details></div>"
     )
+
+
+def header_html(n_papers: int, llm: bool) -> str:
+    systems = [(SYSTEM_COLORS[0], "Word matching · TF-IDF + cosine (ours)"),
+               (SYSTEM_COLORS[1], "Meaning matching · semantic search")]
+    if llm:
+        systems.append((SYSTEM_COLORS[2], "Reading · LLM reranker"))
+    legend = "".join(f'<span class="sys">{_dot(c)}{html.escape(n)}</span>' for c, n in systems)
+    return (f'<div class="irsys hero"><h1>Which search engine finds the paper behind a claim?</h1>'
+            f'<p class="lead">{n_papers:,} scientific papers. Pick an example or type a claim: '
+            f"{len(systems)} engines search at once.</p><div class=\"legend\">{legend}</div></div>")
 
 
 # ---------------------------------------------------------------- Gradio app
 
 CSS = """
-.irsys { font-size: 14px; }
+.irsys { font-size: 16px; line-height: 1.45; }
 .irsys mark { background: #fde68a; color: #111; padding: 0 2px; border-radius: 3px; }
-.irsys .note { color: var(--body-text-color); opacity: 0.8; margin: 4px 0 12px; }
-.irsys .grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(235px, 1fr)); gap: 12px; }
-.irsys .col { border: 1px solid var(--border-color-primary); border-radius: 10px; background: var(--block-background-fill); overflow: hidden; }
-.irsys .col header { border-top: 5px solid; padding: 10px 12px 8px; border-bottom: 1px solid var(--border-color-primary); }
-.irsys .col h3 { margin: 0; font-size: 15px; }
-.irsys .meta { color: var(--body-text-color-subdued); font-size: 12px; }
-.irsys .badge { margin-top: 6px; font-weight: 600; font-size: 13px; }
-.irsys .badge.good { color: #0ca30c; } .irsys .badge.warn { color: #c98500; } .irsys .badge.bad { color: #d03b3b; }
+.irsys .note { color: var(--body-text-color-subdued); margin: 6px 0 12px; }
+.irsys .muted { color: var(--body-text-color-subdued); }
+.irsys h3 { font-size: 20px; margin: 22px 0 8px; }
+.irsys i[style] { display: inline-block; width: 14px; height: 14px; border-radius: 50%; background: var(--c); flex: none; vertical-align: -1px; margin-right: 8px; }
+.hero h1 { font-size: 30px; margin: 2px 0 4px; }
+.hero .lead { font-size: 17px; margin: 0 0 8px; color: var(--body-text-color-subdued); }
+.hero .legend { display: flex; flex-wrap: wrap; gap: 8px 22px; font-weight: 600; }
+.irsys .story { border-radius: 14px; padding: 14px 18px; background: color-mix(in srgb, #f2b544 16%, var(--block-background-fill)); border: 1px solid color-mix(in srgb, #f2b544 55%, transparent); }
+.irsys .story .kicker { font-size: 12.5px; font-weight: 700; letter-spacing: .08em; text-transform: uppercase; color: var(--body-text-color-subdued); }
+.irsys .story .story-head { font-size: 23px; font-weight: 700; margin: 2px 0 4px; }
+.irsys .story p { margin: 0; font-size: 17px; }
+.irsys .tiles { display: grid; grid-template-columns: repeat(auto-fit, minmax(230px, 1fr)); gap: 14px; margin: 6px 0 10px; }
+.irsys .tile { border-radius: 14px; padding: 14px 16px; background: color-mix(in srgb, var(--c) 9%, var(--block-background-fill)); border: 2px solid color-mix(in srgb, var(--c) 55%, transparent); }
+.irsys .tile .name { display: flex; align-items: center; font-weight: 700; font-size: 16px; }
+.irsys .tile .big { font-size: 48px; font-weight: 800; line-height: 1.05; margin-top: 8px; font-variant-numeric: tabular-nums; }
+.irsys .tile .cap { font-size: 13px; color: var(--body-text-color-subdued); }
+.irsys .tile .status { font-weight: 700; margin-top: 6px; }
+.irsys .tile.good .big, .irsys .tile.good .status { color: #0b8a3e; }
+.irsys .tile.warn .big, .irsys .tile.warn .status { color: #b45309; }
+.irsys .tile.bad .big, .irsys .tile.bad .status { color: #c62828; }
+.irsys .tile .time { font-size: 13.5px; color: var(--body-text-color-subdued); margin-top: 4px; }
+.irsys .tile.stat .big { color: var(--body-text-color); }
+.irsys .tile.stat .verdict { font-weight: 700; margin-top: 6px; }
+.irsys .spin { width: 42px; height: 42px; margin: 10px 0 6px; border: 4px solid color-mix(in srgb, var(--c) 25%, transparent); border-top-color: var(--c); border-radius: 50%; animation: irsys-spin .9s linear infinite; }
+@keyframes irsys-spin { to { transform: rotate(360deg); } }
+.irsys .grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(260px, 1fr)); gap: 14px; }
+.irsys .col { border: 1px solid var(--border-color-primary); border-radius: 12px; background: var(--block-background-fill); overflow: hidden; }
+.irsys .col header { border-top: 6px solid var(--c); padding: 10px 14px; border-bottom: 1px solid var(--border-color-primary); }
+.irsys .col h4 { margin: 0; font-size: 16px; display: flex; align-items: center; }
+.irsys .blurb { font-size: 13.5px; color: var(--body-text-color-subdued); margin-top: 3px; }
+.irsys .col.pending .blurb { font-style: italic; padding: 6px 0; }
 .irsys ol { list-style: none; margin: 0; padding: 0; }
-.irsys .hit { padding: 9px 12px; border-bottom: 1px solid var(--border-color-primary); }
-.irsys .hit.relevant { background: rgba(12, 163, 12, 0.10); }
-.irsys .hit-head { display: flex; gap: 8px; align-items: center; font-size: 12px; color: var(--body-text-color-subdued); }
-.irsys .rank { font-weight: 700; color: var(--body-text-color); }
-.irsys .tag { color: #0ca30c; font-weight: 700; }
-.irsys .title { font-weight: 600; margin: 2px 0; }
-.irsys .snippet { font-size: 12.5px; color: var(--body-text-color-subdued); }
-.irsys .empty { padding: 12px; color: var(--body-text-color-subdued); }
-.irsys .formula { background: var(--block-background-fill); border: 1px solid var(--border-color-primary); border-radius: 8px; padding: 8px 12px; }
-.irsys h3 { margin: 18px 0 6px; }
-.irsys .steps th { text-align: left; padding-right: 12px; white-space: nowrap; font-weight: 600; vertical-align: top; }
-.irsys .chip { display: inline-block; padding: 1px 8px; margin: 2px; border-radius: 12px; background: rgba(42, 120, 214, 0.15); font-family: ui-monospace, Consolas, monospace; font-size: 13px; }
-.irsys .chip.dim { opacity: 0.45; text-decoration: line-through; }
-.irsys .chip.pos small { display: block; font-family: system-ui, sans-serif; font-size: 10.5px; color: var(--body-text-color-subdued); text-align: center; }
-.irsys .chip.phrase { background: rgba(237, 161, 0, 0.25); font-weight: 600; }
+.irsys .hit { display: flex; gap: 10px; padding: 10px 14px; border-bottom: 1px solid var(--border-color-primary); cursor: help; }
+.irsys .hit.relevant { background: rgba(11, 138, 62, 0.14); }
+.irsys .rank { font-weight: 800; min-width: 30px; color: var(--body-text-color-subdued); }
+.irsys .hit.relevant .rank, .irsys .tag { color: #0b8a3e; }
+.irsys .tag { display: block; font-weight: 800; font-size: 13px; }
+.irsys .title { font-weight: 600; }
+.irsys .empty { padding: 12px 14px; color: var(--body-text-color-subdued); }
+.irsys .takeaway { font-size: 17.5px; font-weight: 600; padding: 12px 16px; margin: 14px 0 10px; border-radius: 12px; background: color-mix(in srgb, var(--c, #2a78d6) 11%, var(--block-background-fill)); border: 1px solid color-mix(in srgb, var(--c, #2a78d6) 45%, transparent); }
+.irsys .aside { margin: 8px 0 12px; }
+.irsys .aside summary { cursor: pointer; font-weight: 600; color: var(--body-text-color-subdued); }
+.irsys .aside p { margin: 6px 0 0 18px; }
+.irsys .steps th { text-align: left; padding: 6px 12px 6px 0; white-space: nowrap; font-weight: 600; vertical-align: top; }
+.irsys .steps td { padding: 6px 8px; }
 .irsys .steps small { font-weight: 400; color: var(--body-text-color-subdued); }
-.irsys .steps th, .irsys .steps td { padding: 4px 8px; }
-.irsys .blurb { font-size: 12.5px; margin: 2px 0 2px; }
-.irsys .score { font-variant-numeric: tabular-nums; }
-.irsys .col.pending .meta { padding: 8px 0; font-style: italic; }
-.irsys .tbl td.left, .irsys .tbl th.left { text-align: left; font-family: inherit; }
-.irsys .prompt { white-space: pre-wrap; font-size: 12.5px; background: var(--block-background-fill); border: 1px solid var(--border-color-primary); border-radius: 8px; padding: 10px 12px; }
-.irsys .tbl { border-collapse: collapse; margin: 4px 0 8px; font-size: 13px; min-width: 60%; }
-.irsys .tbl th, .irsys .tbl td { border-bottom: 1px solid var(--border-color-primary); padding: 4px 10px; text-align: right; }
+.irsys .chip { display: inline-block; padding: 2px 9px; margin: 2px; border-radius: 12px; background: rgba(42, 120, 214, 0.15); font-family: ui-monospace, Consolas, monospace; font-size: 14px; }
+.irsys .chip.dim { opacity: 0.45; text-decoration: line-through; }
+.irsys .chip.pos small { display: block; font-family: system-ui, sans-serif; font-size: 11px; color: var(--body-text-color-subdued); text-align: center; }
+.irsys .chip.phrase { background: rgba(237, 161, 0, 0.25); font-weight: 600; }
+.irsys .tbl { border-collapse: collapse; margin: 4px 0 8px; font-size: 14.5px; width: 100%; }
+.irsys .tbl th, .irsys .tbl td { border-bottom: 1px solid var(--border-color-primary); padding: 5px 10px; text-align: right; }
 .irsys .tbl th:first-child, .irsys .tbl td.term { text-align: left; font-family: ui-monospace, Consolas, monospace; }
+.irsys .tbl td.left, .irsys .tbl th.left { text-align: left; font-family: inherit; }
+.irsys .tbl td.role { font-weight: 700; white-space: nowrap; }
+.irsys .tbl.pyes td:last-child { white-space: nowrap; font-weight: 700; }
+.irsys .tbl.pyes th { white-space: nowrap; }
 .irsys .tbl tr.absent td { color: var(--body-text-color-subdued); }
-.irsys .barcell { width: 220px; text-align: left !important; }
+.irsys .barcell { width: 26%; text-align: left !important; }
+.irsys .doc .tbl td, .irsys .doc .tbl th { padding: 4px 7px; }
 .irsys .bar { height: 12px; background: #2a78d6; border-radius: 0 4px 4px 0; }
-.irsys .doc { margin: 10px 0 14px; }
-.irsys .doc-head { font-size: 14px; }
+.irsys .duel { display: grid; grid-template-columns: repeat(auto-fit, minmax(420px, 1fr)); gap: 14px; }
+.irsys .doc { border: 1px solid var(--border-color-primary); border-radius: 12px; padding: 12px 14px; background: var(--block-background-fill); }
+.irsys .doc-head { font-size: 15px; }
+.irsys .doc-meta { font-size: 14px; color: var(--body-text-color-subdued); margin-bottom: 4px; }
+.irsys .flow { display: flex; flex-wrap: wrap; gap: 8px; align-items: stretch; }
+.irsys .flow .stepbox { flex: 1 1 220px; padding: 10px 14px; border-radius: 12px; border: 1px solid var(--border-color-primary); background: var(--block-background-fill); }
+.irsys .flow .arrow { align-self: center; font-size: 24px; color: var(--body-text-color-subdued); }
+.irsys .stepbox .n { display: inline-flex; width: 24px; height: 24px; border-radius: 50%; background: var(--c); color: #fff; align-items: center; justify-content: center; margin-right: 8px; font-size: 13px; }
+.irsys .pwrap { display: flex; align-items: center; gap: 10px; }
+.irsys .pbar { flex: 1; min-width: 160px; height: 18px; border-radius: 6px; background: color-mix(in srgb, var(--c) 14%, transparent); overflow: hidden; }
+.irsys .pbar > div { height: 100%; background: var(--c); }
+.irsys .prompt { white-space: pre-wrap; font-size: 13px; background: var(--block-background-fill); border: 1px solid var(--border-color-primary); border-radius: 8px; padding: 10px 12px; }
+.nav-row button { font-size: 16px !important; font-weight: 600 !important; }
+.preset-row button { font-size: 15px !important; }
 """
 
 
@@ -477,12 +687,14 @@ PLAIN_NAMES = {
     "dense-bge": "Meaning matching · semantic search (bge-small)",
     "tfidf-llm": "LLM reranker (Qwen3)",
 }
+SHORT_NAMES = {"tfidf": "TF-IDF + cosine (ours)", "dense-bge": "Semantic search (bge-small)",
+               "tfidf-llm": "LLM reranker (Qwen3)"}
+KEY_COLORS = dict(zip(("tfidf", "dense-bge", "tfidf-llm"), SYSTEM_COLORS))
 
 
-def results_tables(results_dir=RESULTS_DIR) -> str:
-    """The six metrics per system, then time per claim and the significance verdict vs. TF-IDF."""
+def _result_rows(results_dir) -> list[dict]:
+    """Per system: its metrics, time per claim and the significance verdict vs. TF-IDF."""
     from irsys.evaluate import read_markdown_table
-    from irsys.metrics import METRICS
     from irsys.stats import paired_tests
 
     metrics = pd.read_csv(results_dir / "metrics.csv")
@@ -491,28 +703,48 @@ def results_tables(results_dir=RESULTS_DIR) -> str:
     ndcg = pd.read_csv(results_dir / "per_query.csv", dtype={"qid": str}).pivot(
         index="qid", columns="system", values="nDCG@10")
     tests = paired_tests(ndcg["tfidf"], {s: ndcg[s] for s in ndcg if s != "tfidf"}).set_index("system")
-
-    scores = ["| System | " + " | ".join(METRICS) + " |", "|---" * (len(METRICS) + 1) + "|"]
-    extras = ["| System | Time per claim | Really better than TF-IDF? |", "|---|---|---|"]
+    rows = []
     for row in metrics.to_dict("records"):
         key, name = row["system"], row["name"]
-        label = PLAIN_NAMES.get(key, name)
-        scores.append(f"| {label} | " + " | ".join(f"{row[m]:.3f}" for m in METRICS) + " |")
         if key == "tfidf":
             verdict = "— (baseline)"
         elif tests.loc[key, "holm_p"] < 0.05:
             verdict = "yes" if tests.loc[key, "delta"] > 0 else "no, worse"
         else:
             verdict = "no real difference"
-        extras.append(f"| {label} | {_duration(latency[name]) if name in latency else '—'} | {verdict} |")
+        rows.append({"key": key, "metrics": row, "verdict": verdict,
+                     "time": _duration(latency[name]) if name in latency else "—"})
+    return rows
+
+
+def results_tables(results_dir=RESULTS_DIR) -> str:
+    """The six metrics per system, then time per claim and the significance verdict vs. TF-IDF."""
+    from irsys.metrics import METRICS
+
+    scores = ["| System | " + " | ".join(METRICS) + " |", "|---" * (len(METRICS) + 1) + "|"]
+    extras = ["| System | Time per claim | Really better than TF-IDF? |", "|---|---|---|"]
+    for r in _result_rows(results_dir):
+        label = PLAIN_NAMES.get(r["key"], r["metrics"]["name"])
+        scores.append(f"| {label} | " + " | ".join(f"{r['metrics'][m]:.3f}" for m in METRICS) + " |")
+        extras.append(f"| {label} | {r['time']} | {r['verdict']} |")
     return ("**The six metrics** (k = 5 and 10)\n\n" + "\n".join(scores)
             + "\n\n**Speed and significance** (significance tested on nDCG@10)\n\n" + "\n".join(extras) + "\n")
 
 
-def _metrics_markdown() -> str:
-    if not (RESULTS_DIR / "metrics.csv").exists():
-        return "Run `uv run irsys evaluate` to produce the results table."
-    return METRICS_GUIDE + "\n" + results_tables()
+def results_headline(results_dir=RESULTS_DIR) -> str:
+    """One big tile per system: nDCG@10, time per claim, and whether it really beats TF-IDF."""
+    tiles = []
+    for r in _result_rows(results_dir):
+        color = KEY_COLORS.get(r["key"], SYSTEM_COLORS[0])
+        verdict = "the baseline" if r["key"] == "tfidf" else f"really better than TF-IDF? {r['verdict']}"
+        tiles.append(
+            f'<div class="tile stat" style="--c:{color}"><div class="name">{_dot(color)}'
+            f'{html.escape(SHORT_NAMES.get(r["key"], r["metrics"]["name"]))}</div>'
+            f'<div class="big">{r["metrics"]["nDCG@10"]:.3f}</div>'
+            '<div class="cap">nDCG@10, the main grade (1 = correct paper always first)</div>'
+            f'<div class="verdict">{verdict}</div><div class="time">{r["time"]} per claim</div></div>'
+        )
+    return f'<div class="irsys"><div class="tiles">{"".join(tiles)}</div></div>'
 
 
 def build_app(engine: DemoEngine):
@@ -520,63 +752,85 @@ def build_app(engine: DemoEngine):
 
     analyzer = engine.tfidf.analyzer
     latest = {"token": 0}  # the LLM column of an older search must not overwrite a newer one
-    llm_waiting = '<div class="irsys"><p class="note">The LLM is still reading the candidate papers …</p></div>'
+    llm_waiting = ('<div class="irsys"><p class="note">The LLM is still reading the candidate papers … this tab '
+                   "fills in about 5 seconds after a search.</p></div>")
 
     def run_fast(text: str):
         text = (text or "").strip()
         if not text:
-            return "<p>Type a claim or pick an example.</p>", "", "", None
+            return ("", '<div class="irsys"><p class="note">Type a claim or pick an example.</p></div>', "", "", "",
+                    None)
         latest["token"] += 1
         fast = engine.compare(text, k=5, names=engine.fast_names())
         pending = [engine.llm_name] if engine.llm_name else []
-        return (render_results(fast, analyzer, text, pending), render_explanation(engine, text),
+        return (render_story(engine, text), render_tiles(fast, pending), render_lists(fast, analyzer, text, pending),
+                render_explanation(engine, text),
                 llm_waiting if pending else render_llm_explanation(engine, text), (latest["token"], fast))
 
     def run_llm(text: str, state):
         if not engine.llm_name or state is None:
-            return gr.skip(), gr.skip()
+            return gr.skip(), gr.skip(), gr.skip()
         token, fast = state
         text = text.strip()
         (llm,) = engine.compare(text, k=5, names=[engine.llm_name])
         if token != latest["token"]:  # a newer search started meanwhile
-            return gr.skip(), gr.skip()
-        return render_results(fast + [llm], analyzer, text), render_llm_explanation(engine, text, llm)
+            return gr.skip(), gr.skip(), gr.skip()
+        both = fast + [llm]
+        return render_tiles(both), render_lists(both, analyzer, text), render_llm_explanation(engine, text, llm)
 
     def setter(value: str):
         return lambda: value
 
+    def go(tab: str):
+        return lambda: gr.Tabs(selected=tab)
+
     first = engine.queries[PRESETS[0][1]]
     with gr.Blocks(title="Classical vs AI Search", analytics_enabled=False) as app:
-        gr.Markdown(
-            f"## Classical vs. AI search on {len(engine.corpus):,} scientific papers\n"
-            "Type a scientific claim, or click an example. Each search engine lists the papers it thinks best "
-            "support or refute the claim. For the examples we know which paper is correct, so you can see which "
-            "engine finds it."
-        )
-        with gr.Row():
-            query = gr.Textbox(value=first, label="Scientific claim", scale=6, lines=1)
+        gr.HTML(header_html(len(engine.corpus), engine.llm_name is not None))
+        with gr.Row(equal_height=True):
+            query = gr.Textbox(value=first, label="Scientific claim (click an example, or type your own and press Enter)",
+                               scale=6, lines=1)
             search = gr.Button("Search", variant="primary", scale=1)
-        with gr.Row():
-            presets = [(gr.Button(label, size="sm"), engine.queries[qid]) for label, qid in PRESETS]
-            shuffle = gr.Button("🎲 Random test claim", size="sm")
-        with gr.Tabs():
-            with gr.Tab("1 · Compare the search engines"):
-                results = gr.HTML()
-            with gr.Tab("2 · Inside TF-IDF"):
+        with gr.Row(elem_classes="preset-row"):
+            presets = [(gr.Button(label), engine.queries[qid]) for label, qid in PRESETS]
+            shuffle = gr.Button("🎲 Random test claim")
+        story = gr.HTML()
+        with gr.Tabs(selected="compare") as tabs:
+            with gr.Tab("1 · Compare the search engines", id="compare"):
+                tiles = gr.HTML()
+                with gr.Row(elem_classes="nav-row"):
+                    to_tfidf = gr.Button("Why did word matching rank them like this?  →  2 · Inside TF-IDF")
+                    to_llm = gr.Button("How did the LLM decide?  →  3 · Inside the LLM",
+                                       visible=engine.llm_name is not None)
+                lists = gr.HTML()
+            with gr.Tab("2 · Inside TF-IDF", id="tfidf"):
                 explanation = gr.HTML()
-            with gr.Tab("3 · Inside the LLM"):
+                back_tfidf = gr.Button("←  Back to 1 · Compare", size="sm")
+            with gr.Tab("3 · Inside the LLM", id="llm"):
                 llm_explanation = gr.HTML()
-            with gr.Tab("4 · Results on all 300 test claims"):
-                gr.Markdown(_metrics_markdown())
+                back_llm = gr.Button("←  Back to 1 · Compare", size="sm")
+            with gr.Tab("4 · Results on all 300 test claims", id="results"):
+                if (RESULTS_DIR / "metrics.csv").exists():
+                    gr.HTML(results_headline())
+                    with gr.Accordion("What do these numbers mean?", open=False):
+                        gr.Markdown(METRICS_GUIDE)
+                    gr.Markdown(results_tables())
+                else:
+                    gr.Markdown("Run `uv run irsys evaluate` to produce the results.")
                 figures = RESULTS_DIR / "figures"
                 for name in FIGURE_CAPTIONS:  # one per row: big enough to read on a projector
                     if (figures / f"{name}.png").exists():
                         gr.Image(str(figures / f"{name}.png"), show_label=False, interactive=False)
                         gr.Markdown(f"*{FIGURE_CAPTIONS[name]}*")
 
+        to_tfidf.click(go("tfidf"), None, tabs)
+        to_llm.click(go("llm"), None, tabs)
+        back_tfidf.click(go("compare"), None, tabs)
+        back_llm.click(go("compare"), None, tabs)
+
         state = gr.State()
-        fast_outputs = [results, explanation, llm_explanation, state]
-        llm_outputs = [results, llm_explanation]
+        fast_outputs = [story, tiles, lists, explanation, llm_explanation, state]
+        llm_outputs = [tiles, lists, llm_explanation]
         search.click(run_fast, query, fast_outputs).then(run_llm, [query, state], llm_outputs)
         query.submit(run_fast, query, fast_outputs).then(run_llm, [query, state], llm_outputs)
         for button, text in presets:

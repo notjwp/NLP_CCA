@@ -41,8 +41,9 @@ uv run irsys demo --no-llm # the same without the LLM column (no GPU needed)
 
 `irsys demo` opens a local web app with four tabs:
 - **Tab 1:** live search with word matching (TF-IDF), meaning matching (bge-small embeddings) and the
-  LLM reranker side by side, with matching words highlighted and a ✓ on the correct paper for
-  benchmark claims.
+  LLM reranker side by side: a one-line story for each example, one big tile per engine showing where it
+  put the correct paper, "why?" buttons into tabs 2 and 3, and the three result lists with matching words
+  highlighted.
 - **Tab 2:** inside TF-IDF: tokens, part-of-speech tags, noun phrases, stopwords, stems, then how each
   word's weight adds up to the score.
 - **Tab 3:** inside the LLM: the exact yes/no prompt and the probability of "yes" for the papers that matter.
